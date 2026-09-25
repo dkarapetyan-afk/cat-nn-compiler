@@ -3,6 +3,8 @@
 pub mod adjoint;
 pub mod cpu;
 pub mod cuda;
+pub mod fd64;
+pub mod measure;
 pub mod moe;
 pub mod reference;
 pub mod resource;

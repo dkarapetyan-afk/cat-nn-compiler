@@ -5,7 +5,7 @@
 //! scheduled timeline. A tight buffer budget forces activation
 //! checkpointing; a tight code budget forces kernel reloads. Both are
 //! 2-cells with equivalence witnesses — rematerialized activations match
-//! the stored ones to float tolerance.
+//! the stored ones bit-for-bit when both paths use `linear_seq`.
 
 use catnn_core::architecture::{DeviceMemory, MemoryBudget, MemoryHierarchy};
 use catnn_core::lens::{Adam, AdamState, OptimizerKind, Sgd};
@@ -248,7 +248,7 @@ pub fn mixtral_step(
     let mut x = moe::embedding(tokens, &w.embed, h)?;
     x.ty = TensorType::f32([batch, seq, h]);
     let mut xs = vec![x.clone()];
-    let mut saved = Vec::new();
+    let mut saved: Vec<(Tensor, Tensor, Tensor, Tensor)> = Vec::new();
     for layer in &w.layers {
         let xn = moe::rmsnorm(&x, &layer.rms_attn, cfg.rms_norm_eps)?;
         let attn = moe::gqa(
@@ -289,49 +289,16 @@ pub fn mixtral_step(
 
     for li in (0..w.layers.len()).rev() {
         let layer = &w.layers[li];
-        let x_in = &xs[li + 1]; // after moe residual — wait xs[li] is input to layer
-        let x_pre_moe = {
-            // rematerialize or use saved
-            let (ref _xn, ref xm, ref attn, ref _m) = saved[li];
-            if checkpoint {
-                // Recompute layer from xs[li].
-                let xin = &xs[li];
-                let xn = moe::rmsnorm(xin, &layer.rms_attn, cfg.rms_norm_eps)?;
-                let attn = moe::gqa(
-                    &xn,
-                    &layer.wq,
-                    &layer.wk,
-                    &layer.wv,
-                    &layer.wo,
-                    cfg.num_attention_heads,
-                    cfg.num_key_value_heads,
-                    hd,
-                    cfg.rope_theta,
-                    cfg.sliding_window,
-                )?;
-                let xmid = add_tensors(xin, &attn)?;
-                let xm = moe::rmsnorm(&xmid, &layer.rms_moe, cfg.rms_norm_eps)?;
-                (xmid, xm)
-            } else {
-                let xmid = add_tensors(&xs[li], attn)?;
-                (xmid, xm.clone())
-            }
-        };
-        let (xmid, xm) = x_pre_moe;
+        // x_out = x_mid + moe(rmsnorm(x_mid)); x_mid = x_in + attn(rmsnorm(x_in)).
+        let (xmid, xm, xn) = rematerialize_layer(cfg, layer, &xs[li], &saved[li], hd, checkpoint)?;
         let (dxm, dgate, dex) =
             moe_backward(&xm, &layer.gate, &layer.experts, cfg.num_experts_per_tok, &dx)?;
         grads.layers[li].gate = dgate;
         grads.layers[li].experts = dex;
-        let (dxmid, drm) = rmsnorm_backward(&xmid, &layer.rms_moe, &dxm, cfg.rms_norm_eps)?;
+        let (dxmid_moe, drm) = rmsnorm_backward(&xmid, &layer.rms_moe, &dxm, cfg.rms_norm_eps)?;
         grads.layers[li].rms_moe = drm;
-        // residual: dx flows to attn out and skip
-        let dx_skip = dxmid.clone();
-        let (xn, _) = if checkpoint {
-            let xin = &xs[li];
-            (moe::rmsnorm(xin, &layer.rms_attn, cfg.rms_norm_eps)?, xin.clone())
-        } else {
-            (saved[li].0.clone(), xs[li].clone())
-        };
+        // Residual skip around MoE: d(x_mid) += d(x_out).
+        let dx_mid = add_tensors(&dx, &dxmid_moe)?;
         let (dxn, dwq, dwk, dwv, dwo) = gqa_backward(
             &xn,
             &layer.wq,
@@ -343,23 +310,55 @@ pub fn mixtral_step(
             hd,
             cfg.rope_theta,
             cfg.sliding_window,
-            &dx_skip,
+            &dx_mid,
         )?;
         grads.layers[li].wq = dwq;
         grads.layers[li].wk = dwk;
         grads.layers[li].wv = dwv;
         grads.layers[li].wo = dwo;
-        let (dxin, dra) = rmsnorm_backward(&xs[li], &layer.rms_attn, &dxn, cfg.rms_norm_eps)?;
+        let (dxin_attn, dra) = rmsnorm_backward(&xs[li], &layer.rms_attn, &dxn, cfg.rms_norm_eps)?;
         grads.layers[li].rms_attn = dra;
-        // skip connections
-        let _ = x_in;
-        let _ = xn;
-        // Residual: x_{l+1} = moe + x_mid, x_mid = attn + x_l.
-        dx = add_tensors(&dxin, &dxmid)?;
+        // Residual skip around attention: d(x_in) += d(x_mid).
+        dx = add_tensors(&dxin_attn, &dx_mid)?;
     }
     grads.embed = embedding_backward(tokens, &w.embed, &dx)?;
     let _ = (checkpoint, xs);
     Ok((loss, grads))
+}
+
+/// Rebuild `(x_mid, x_moe_in, x_attn_in)` either from the saved tape or
+/// by re-running the same sequential kernels. With `linear_seq` these
+/// two paths are bit-identical.
+fn rematerialize_layer(
+    cfg: &MixtralConfig,
+    layer: &moe::LayerWeights,
+    xin: &Tensor,
+    saved: &(Tensor, Tensor, Tensor, Tensor),
+    hd: usize,
+    checkpoint: bool,
+) -> CatResult<(Tensor, Tensor, Tensor)> {
+    let (ref xn_s, ref xm_s, ref attn_s, ref _m) = *saved;
+    if checkpoint {
+        let xn = moe::rmsnorm(xin, &layer.rms_attn, cfg.rms_norm_eps)?;
+        let attn = moe::gqa(
+            &xn,
+            &layer.wq,
+            &layer.wk,
+            &layer.wv,
+            &layer.wo,
+            cfg.num_attention_heads,
+            cfg.num_key_value_heads,
+            hd,
+            cfg.rope_theta,
+            cfg.sliding_window,
+        )?;
+        let xmid = add_tensors(xin, &attn)?;
+        let xm = moe::rmsnorm(&xmid, &layer.rms_moe, cfg.rms_norm_eps)?;
+        Ok((xmid, xm, xn))
+    } else {
+        let xmid = add_tensors(xin, attn_s)?;
+        Ok((xmid, xm_s.clone(), xn_s.clone()))
+    }
 }
 
 fn transpose2(w: &Tensor, rows: usize, cols: usize) -> CatResult<Tensor> {
@@ -480,20 +479,100 @@ pub fn plan_mixtral_tiny_schedule(budget: Option<MemoryBudget>) -> CatResult<Sch
     }))
 }
 
-/// Unconstrained vs tight-budget Mixtral run: same seeds, compare params.
+/// Unconstrained vs rematerialized Mixtral: same seeds. Returns the
+/// max-abs parameter difference after `steps` SGD updates. With sequential
+/// GEMM this is **0** (bit-identical activations and grads).
 pub fn constrained_matches_unconstrained() -> CatResult<f32> {
+    let (err, _) = constrained_match_report(3)?;
+    Ok(err)
+}
+
+pub fn constrained_match_report(steps: usize) -> CatResult<(f32, String)> {
     let cfg = MixtralConfig::tiny();
     let tokens = [1u32, 2, 3, 4, 5, 6, 7, 8];
     let mut a = MixtralWeights::seeded(&cfg, 3)?;
     let mut b = a.clone();
     let sgd = Sgd::new(0.02);
-    for _ in 0..3 {
-        let ( _, ga) = mixtral_step(&cfg, &a, &tokens, 2, 4, false)?;
-        let ( _, gb) = mixtral_step(&cfg, &b, &tokens, 2, 4, true)?;
+    let mut first_grad = 0.0f32;
+    for step in 0..steps {
+        let (_, ga) = mixtral_step(&cfg, &a, &tokens, 2, 4, false)?;
+        let (_, gb) = mixtral_step(&cfg, &b, &tokens, 2, 4, true)?;
+        let gerr = max_grad_abs_diff(&ga, &gb)?;
+        if step == 0 {
+            first_grad = gerr;
+        }
         apply_grads_sgd(&mut a, &ga, sgd)?;
         apply_grads_sgd(&mut b, &gb, sgd)?;
     }
-    a.embed.max_abs_diff(&b.embed)
+    let err = max_weight_abs_diff(&a, &b)?;
+    let note = format!(
+        "first-step grad max-abs {first_grad:.3e}; param max-abs after {steps} SGD {err:.3e}. \
+         rematerialization uses linear_seq (same kernel, same reduction order)."
+    );
+    Ok((err, note))
+}
+
+fn max_grad_abs_diff(a: &MixtralGrads, b: &MixtralGrads) -> CatResult<f32> {
+    let mut m = a.embed.max_abs_diff(&b.embed)?;
+    m = m.max(a.final_norm.max_abs_diff(&b.final_norm)?);
+    m = m.max(a.lm_head.max_abs_diff(&b.lm_head)?);
+    for (la, lb) in a.layers.iter().zip(b.layers.iter()) {
+        m = m.max(la.rms_attn.max_abs_diff(&lb.rms_attn)?);
+        m = m.max(la.wq.max_abs_diff(&lb.wq)?);
+        m = m.max(la.wk.max_abs_diff(&lb.wk)?);
+        m = m.max(la.wv.max_abs_diff(&lb.wv)?);
+        m = m.max(la.wo.max_abs_diff(&lb.wo)?);
+        m = m.max(la.rms_moe.max_abs_diff(&lb.rms_moe)?);
+        m = m.max(la.gate.max_abs_diff(&lb.gate)?);
+        for (ea, eb) in la.experts.iter().zip(lb.experts.iter()) {
+            m = m.max(ea.0.max_abs_diff(&eb.0)?);
+            m = m.max(ea.1.max_abs_diff(&eb.1)?);
+            m = m.max(ea.2.max_abs_diff(&eb.2)?);
+        }
+    }
+    Ok(m)
+}
+
+fn max_weight_abs_diff(a: &MixtralWeights, b: &MixtralWeights) -> CatResult<f32> {
+    let ga = MixtralGrads {
+        embed: a.embed.clone(),
+        layers: a
+            .layers
+            .iter()
+            .map(|l| LayerGrads {
+                rms_attn: l.rms_attn.clone(),
+                wq: l.wq.clone(),
+                wk: l.wk.clone(),
+                wv: l.wv.clone(),
+                wo: l.wo.clone(),
+                rms_moe: l.rms_moe.clone(),
+                gate: l.gate.clone(),
+                experts: l.experts.clone(),
+            })
+            .collect(),
+        final_norm: a.final_norm.clone(),
+        lm_head: a.lm_head.clone(),
+    };
+    let gb = MixtralGrads {
+        embed: b.embed.clone(),
+        layers: b
+            .layers
+            .iter()
+            .map(|l| LayerGrads {
+                rms_attn: l.rms_attn.clone(),
+                wq: l.wq.clone(),
+                wk: l.wk.clone(),
+                wv: l.wv.clone(),
+                wo: l.wo.clone(),
+                rms_moe: l.rms_moe.clone(),
+                gate: l.gate.clone(),
+                experts: l.experts.clone(),
+            })
+            .collect(),
+        final_norm: b.final_norm.clone(),
+        lm_head: b.lm_head.clone(),
+    };
+    max_grad_abs_diff(&ga, &gb)
 }
 
 /// One Mixtral-8x7B *layer* training step (fwd + bwd) as a unified timeline.
@@ -618,28 +697,10 @@ pub fn mixtral_layer_timeline_excerpt() -> CatResult<String> {
 }
 
 pub fn kernel_resources_for_mixtral() -> Vec<KernelResource> {
-    vec![
-        describe(&OpenOp::RmsNorm { eps_e6: 10 }, "rmsnorm", KernelBackend::CudaSm121),
-        describe(
-            &OpenOp::GqaAttention {
-                n_heads: 32,
-                n_kv_heads: 8,
-                head_dim: 128,
-                d_model: 4096,
-                sliding_window: None,
-                rope_theta: 1_000_000,
-            },
-            "gqa",
-            KernelBackend::CudaSm121,
-        ),
-        describe(&OpenOp::SwiGlu { hidden: 4096, intermediate: 14336 }, "swiglu", KernelBackend::CudaSm121),
-        describe(&OpenOp::Router { n_experts: 8, top_k: 2 }, "router", KernelBackend::CudaSm121),
-        describe(
-            &OpenOp::Linear { in_features: 4096, out_features: 4096, bias: false },
-            "gemm",
-            KernelBackend::CudaSm121,
-        ),
-    ]
+    crate::kernel::measure::specialized_ops()
+        .into_iter()
+        .map(|(name, op)| describe(&op, &name, KernelBackend::CudaSm121))
+        .collect()
 }
 
 #[cfg(test)]
@@ -684,8 +745,8 @@ mod tests {
 
     #[test]
     fn constrained_equals_unconstrained() {
-        let err = constrained_matches_unconstrained().unwrap();
-        assert!(err < 2e-4, "param drift {err}");
+        let (err, note) = constrained_match_report(3).unwrap();
+        assert_eq!(err, 0.0, "param drift {err} ({note})");
     }
 
     #[test]

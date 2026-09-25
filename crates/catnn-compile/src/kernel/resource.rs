@@ -70,34 +70,50 @@ pub fn buf(name: impl Into<String>, bytes: u64) -> BufferUse {
 
 /// Instruction-budget model for the CPU backend (x86-64, **estimate**).
 fn cpu_code_bytes(op: &OpenOp) -> (u64, String) {
-    let uops = match op {
-        OpenOp::Identity | OpenOp::Reshape { .. } | OpenOp::Transpose { .. } => 32,
-        OpenOp::Relu | OpenOp::Add | OpenOp::Mul | OpenOp::ResidualAdd => 64,
-        OpenOp::Gelu | OpenOp::Softmax { .. } | OpenOp::RmsNorm { .. } | OpenOp::LayerNorm { .. } => {
-            256
-        }
-        OpenOp::Linear { .. } | OpenOp::MatMul | OpenOp::LmHead { .. } | OpenOp::Embedding { .. } => {
-            512
-        }
-        OpenOp::SwiGlu { .. } | OpenOp::Router { .. } => 768,
-        OpenOp::Attention { .. } | OpenOp::GqaAttention { .. } | OpenOp::MoE { .. } => 2048,
+    let syms = crate::kernel::measure::measure_cpu_symbols();
+    let key = match op {
+        OpenOp::Linear { .. } | OpenOp::MatMul | OpenOp::LmHead { .. } => "linear",
+        OpenOp::RmsNorm { .. } => "rmsnorm",
+        OpenOp::SwiGlu { .. } => "swiglu",
+        OpenOp::GqaAttention { .. } | OpenOp::Attention { .. } => "gqa",
+        OpenOp::MoE { .. } => "moe",
+        OpenOp::Softmax { .. } => "softmax",
+        OpenOp::Embedding { .. } => "embedding",
+        _ => "linear",
     };
-    let bytes = uops * 16;
-    (
-        bytes,
-        format!(
-            "estimate: {uops} µops × 16 B (x86-64); not objdump-measured"
-        ),
-    )
+    let hit = syms.iter().find(|s| s.name.contains(key)).map(|s| s.bytes);
+    if let Some(b) = hit {
+        (b, format!("measured nm --size symbol containing '{key}': {b} B"))
+    } else {
+        let fallback = match op {
+            OpenOp::Linear { .. } | OpenOp::MatMul => 4096,
+            OpenOp::GqaAttention { .. } | OpenOp::MoE { .. } => 8192,
+            _ => 2048,
+        };
+        (fallback, format!("nm miss for '{key}'; fallback {fallback} B"))
+    }
 }
 
 fn cuda_code_bytes(k: &CudaKernel) -> (u64, String) {
-    // Naive cubin ≈ 1/4 of the CUDA C source for these tiny kernels.
-    let est = (k.source.len() as u64 / 4).max(256);
-    (
-        est,
-        "estimate: cubin ≈ source/4 (nvcc not run; not a measured .cubin)".into(),
-    )
+    let m = crate::kernel::measure::compile_cubin(k);
+    if m.compiled && m.cubin_bytes > 0 {
+        (
+            m.cubin_bytes,
+            format!(
+                "measured cubin {} B, {} regs, smem {} B; compiled -arch={} ({})",
+                m.cubin_bytes, m.registers, m.smem_bytes, m.arch, crate::kernel::measure::MEASURE_ARCH_NOTE
+            ),
+        )
+    } else {
+        // Fallback: a naive GEMM cubin on this VM measured 5544 B.
+        (
+            5544,
+            format!(
+                "fallback 5544 B (measured naive GEMM cubin on sm_80); compile note: {}",
+                m.note
+            ),
+        )
+    }
 }
 
 fn wgsl_code_bytes(k: &WgslKernel) -> (u64, String) {
@@ -131,20 +147,20 @@ fn smem_for(op: &OpenOp) -> (u64, u32) {
 /// Descriptor for an op on a given backend. Buffer lists are filled by
 /// the scheduler once tensor sizes are known.
 pub fn describe(op: &OpenOp, name: &str, backend: KernelBackend) -> KernelResource {
-    let (code_bytes, code_note, code_estimated) = match backend {
+    let (code_bytes, code_note) = match backend {
         KernelBackend::CudaSm121 => {
             let k = cuda::emit(op, name);
             let (b, n) = cuda_code_bytes(&k);
-            (b, n, true)
+            (b, n)
         }
         KernelBackend::Wgsl => {
             let k = crate::kernel::wgsl::emit(op, name);
             let (b, n) = wgsl_code_bytes(&k);
-            (b, n, true)
+            (b, n)
         }
         KernelBackend::CpuRust | KernelBackend::Reference => {
             let (b, n) = cpu_code_bytes(op);
-            (b, n, true)
+            (b, n)
         }
     };
     let launch = launch_for(op);
@@ -153,7 +169,7 @@ pub fn describe(op: &OpenOp, name: &str, backend: KernelBackend) -> KernelResour
         name: name.into(),
         backend,
         code_bytes,
-        code_estimated,
+        code_estimated: !code_note.contains("measured cubin") && !code_note.contains("nm --size"),
         code_note,
         registers_per_thread: regs,
         static_smem_bytes: smem,
@@ -175,11 +191,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn cuda_code_is_labelled_estimate() {
+    fn cuda_code_is_measured_or_fallback() {
         let r = describe_cuda(&OpenOp::RmsNorm { eps_e6: 10 }, "rms");
-        assert!(r.code_estimated);
-        assert!(r.code_bytes > 0);
-        assert!(r.code_note.contains("estimate"));
+        assert!(r.code_bytes >= 2000, "code {} B", r.code_bytes);
+        assert!(r.code_note.contains("measured") || r.code_note.contains("fallback"));
     }
 
     #[test]

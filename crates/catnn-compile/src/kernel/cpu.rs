@@ -108,8 +108,44 @@ pub fn mul(a: &Tensor, b: &Tensor) -> CatResult<Tensor> {
     Ok(y)
 }
 
+/// Sequential GEMM used by Mixtral rematerialization so checkpointed
+/// activations match the stored ones bit-for-bit (Rayon row order is
+/// deterministic per element, but we refuse to rely on that).
+#[inline(never)]
+pub fn matmul_mk_kn_seq(a: &[f32], b: &[f32], c: &mut [f32], m: usize, k: usize, n: usize) {
+    for i in 0..m {
+        let ai = &a[i * k..(i + 1) * k];
+        for j in 0..n {
+            let mut s = 0.0f32;
+            for p in 0..k {
+                s += ai[p] * b[p * n + j];
+            }
+            c[i * n + j] = s;
+        }
+    }
+}
+
+/// `y = x @ w + b?` with `x: [M, K]`, `w: [K, N]`. Sequential (bit-stable).
+#[inline(never)]
+pub fn linear_seq(x: &Tensor, w: &Tensor, bias: Option<&Tensor>) -> CatResult<Tensor> {
+    linear_inner(x, w, bias, false)
+}
+
 /// `y = x @ w + b?` with `x: [M, K]`, `w: [K, N]`.
 pub fn linear(x: &Tensor, w: &Tensor, bias: Option<&Tensor>) -> CatResult<Tensor> {
+    let xd = &x.ty.shape.dims;
+    let wd = &w.ty.shape.dims;
+    if xd.len() < 2 || wd.len() != 2 {
+        return Err(CatError::ShapeMismatch(format!("linear {} @ {}", x.ty, w.ty)));
+    }
+    let k = xd[xd.len() - 1];
+    if wd[0] != k {
+        return Err(CatError::ShapeMismatch(format!("linear K {k} vs {}", wd[0])));
+    }
+    linear_inner(x, w, bias, true)
+}
+
+fn linear_inner(x: &Tensor, w: &Tensor, bias: Option<&Tensor>, parallel: bool) -> CatResult<Tensor> {
     let xd = &x.ty.shape.dims;
     let wd = &w.ty.shape.dims;
     if xd.len() < 2 || wd.len() != 2 {
@@ -124,7 +160,11 @@ pub fn linear(x: &Tensor, w: &Tensor, bias: Option<&Tensor>) -> CatResult<Tensor
     let mut out_dims = xd.clone();
     *out_dims.last_mut().unwrap() = n;
     let mut y = Tensor::zeros(catnn_core::tensor::TensorType::f32(out_dims));
-    matmul_mk_kn(&x.data, &w.data, &mut y.data, m, k, n);
+    if parallel {
+        matmul_mk_kn(&x.data, &w.data, &mut y.data, m, k, n);
+    } else {
+        matmul_mk_kn_seq(&x.data, &w.data, &mut y.data, m, k, n);
+    }
     if let Some(b) = bias {
         if b.data.len() != n {
             return Err(CatError::ShapeMismatch("bias length".into()));

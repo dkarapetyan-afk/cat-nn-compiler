@@ -13,6 +13,7 @@ fn silu(x: f32) -> f32 {
     x / (1.0 + (-x).exp())
 }
 
+#[inline(never)]
 pub fn rmsnorm(x: &Tensor, w: &Tensor, eps: f32) -> CatResult<Tensor> {
     let last =
         *x.ty.shape.dims.last().ok_or_else(|| CatError::ShapeMismatch("rms scalar".into()))?;
@@ -59,6 +60,7 @@ fn apply_rope(q: &mut [f32], head_dim: usize, pos: usize, theta: f64) {
 
 /// GQA + RoPE + optional sliding window. `x` is `[B,S,H]` (already RMS-normed).
 #[allow(clippy::too_many_arguments)]
+#[inline(never)]
 pub fn gqa(
     x: &Tensor,
     wq: &Tensor,
@@ -142,7 +144,7 @@ fn linear3(
     dout: usize,
 ) -> CatResult<Tensor> {
     let flat = Tensor::from_vec(TensorType::f32([b * s, din]), x.data.clone())?;
-    let y = crate::kernel::cpu::linear(&flat, w, None)?;
+    let y = crate::kernel::cpu::linear_seq(&flat, w, None)?;
     if y.data.len() != b * s * dout {
         return Err(CatError::ShapeMismatch(format!(
             "linear3 out {} vs {}",
@@ -153,20 +155,21 @@ fn linear3(
     Tensor::from_vec(TensorType::f32([b, s, dout]), y.data)
 }
 
+#[inline(never)]
 pub fn swiglu(x: &Tensor, w1: &Tensor, w3: &Tensor, w2: &Tensor) -> CatResult<Tensor> {
     let dims = &x.ty.shape.dims;
     let hidden = *dims.last().unwrap();
     let tokens = x.data.len() / hidden;
     let mid = w1.ty.shape.dims[1];
     let xf = Tensor::from_vec(TensorType::f32([tokens, hidden]), x.data.clone())?;
-    let a = crate::kernel::cpu::linear(&xf, w1, None)?;
-    let c = crate::kernel::cpu::linear(&xf, w3, None)?;
+    let a = crate::kernel::cpu::linear_seq(&xf, w1, None)?;
+    let c = crate::kernel::cpu::linear_seq(&xf, w3, None)?;
     let mut h = a;
     for i in 0..h.data.len() {
         h.data[i] = silu(h.data[i]) * c.data[i];
     }
     h.ty = TensorType::f32([tokens, mid]);
-    let y = crate::kernel::cpu::linear(&h, w2, None)?;
+    let y = crate::kernel::cpu::linear_seq(&h, w2, None)?;
     Tensor::from_vec(x.ty.clone(), y.data)
 }
 
@@ -180,7 +183,7 @@ pub fn route(
     let n_exp = gate.ty.shape.dims[1];
     let tokens = x.data.len() / hidden;
     let xf = Tensor::from_vec(TensorType::f32([tokens, hidden]), x.data.clone())?;
-    let logits = crate::kernel::cpu::linear(&xf, gate, None)?;
+    let logits = crate::kernel::cpu::linear_seq(&xf, gate, None)?;
     let mut idx_all = Vec::new();
     let mut w_all = Vec::new();
     for row in logits.data.chunks(n_exp) {
@@ -325,7 +328,7 @@ pub fn lm_head(x: &Tensor, w: &Tensor, vocab: usize) -> CatResult<Tensor> {
     // w is stored [V, H] like HF; linear wants [H, V].
     let wt = transpose2(w, vocab, h)?;
     let flat = Tensor::from_vec(TensorType::f32([b * s, h]), x.data.clone())?;
-    let y = crate::kernel::cpu::linear(&flat, &wt, None)?;
+    let y = crate::kernel::cpu::linear_seq(&flat, &wt, None)?;
     Tensor::from_vec(TensorType::f32([b, s, vocab]), y.data)
 }
 

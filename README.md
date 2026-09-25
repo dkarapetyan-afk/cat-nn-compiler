@@ -170,11 +170,13 @@ Honest list, not a roadmap disguised as completeness:
 - `catnn-core::spec::mixtral` — HF 8x7B / 8x22B param counts; tiny architecture type-check.
 - `catnn-core::lens::moe` — expert coproduct injections; router is an unlawful optic.
 - `catnn-compile::kernel::moe` — scaled-down Mixtral CPU vs independent naïve reference.
-- `catnn-compile::kernel::adjoint` — finite-difference checks on linear / RMSNorm / GELU.
+- `catnn-compile::kernel::adjoint` — f32 finite-difference smoke checks on linear / RMSNorm.
+- `catnn-compile::kernel::fd64` — f64 central differences for every training adjoint (linear, softmax, CE, embedding, SwiGLU, GQA+RoPE+window, frozen-index MoE, tiny Mixtral e2e) at ~1e-6 relative.
+- `catnn-compile::kernel::measure` — `nvcc -arch=sm_80` cubin / ptxas regs+SMEM; `nm --size` CPU symbols.
 - `catnn-compile::schedule` — arena aliasing, peak ≤ cap, tight code → reloads, overflow names the region.
-- `catnn-compile::train` — MLP/tiny Mixtral loss decreases; constrained = unconstrained; per-region shrink.
+- `catnn-compile::train` — MLP/tiny Mixtral loss decreases; constrained rematerialization is bit-identical; per-region shrink.
 - `catnn-compile::spark_place` — 8x22B BF16 on 1 Spark is infeasible; 8x7B FP4 fits.
-- `catnn-compile::spark_train` — 8x7B train on N=1 is OOM; tiny train plan fits.
+- `catnn-compile::spark_train` — 8x7B train on N=1 needs NVMe offload; tiny train plan fits.
 
 ## Memory spec
 
@@ -225,7 +227,7 @@ cargo run -p catnn-cli -- train mixtral-tiny --steps 4 --opt sgd --mem-per-devic
 cargo run -p catnn-cli -- mixtral-train-sweep --seq 2048 --global-batch 8
 ```
 
-The constrained (checkpointed) tiny Mixtral schedule executes on CPU and matches unconstrained params to `< 2e-4`. Full-size 8x7B / 8x22B training is the Spark *plan* (ZeRO, 1F1B, simulated code/buffer/scratch peaks), not a materialized step.
+The constrained (checkpointed) tiny Mixtral schedule rematerializes with the same sequential GEMM (`linear_seq`) as the stored-activation path, so activations and parameter updates are **bit-identical** on this deterministic CPU. Full-size 8x7B / 8x22B training is the Spark *plan* (joint EP/TP/PP/DP × ZeRO × checkpoint × NVMe offload, 1F1B, simulated code/buffer/scratch peaks), not a materialized step.
 
 ## Mixtral and DGX Spark
 
@@ -257,7 +259,7 @@ cargo run -p catnn-cli -- mixtral-sweep
 
 NVIDIA product page: GB10 Grace Blackwell, **128 GB** unified LPDDR5x, **273 GB/s**, ConnectX-7 **200 Gb/s**, up to **1 PFLOP FP4**, 20-core Arm. Compute capability **12.1 / `sm_121`** (not datacenter `sm_100`). Official Cluster Assistant: **2–4** Sparks (direct 2–3, switch 2–4). N=8 is accepted as a manual topology and flagged unsupported.
 
-Placement uses 20 GiB OS + 4 GiB workspace reserve (usable **104 GiB** buffer). Each Spark device also has a **code** region (64 MiB resident modules, **assumption** — GB10 I-cache unpublished) and a **scratch** region (228 KiB SMEM/block from B200 public figures, **assumption** for GB10). Expert GEMMs are sharded by **EP × TP × PP**; attention is TP×PP only (replicated across EP). Search enumerates every `EP*TP*PP=N` factorization that fits and keeps the **minimum decode-step** plan (within 10%, higher EP wins). Decode time is per-node HBM at 273 GB/s plus EP all-to-all, two TP ring all-reduces per layer, and PP P2P over ConnectX-7 200 Gb/s. Training adds bf16 grads + fp32 master + Adam state (16 B/param), ZeRO, activation checkpointing, and a simulated code/buffer/scratch timeline. CUDA kernels are emitted for `sm_121`; cubin sizes are **estimates** unless `nvcc` is present.
+Placement uses 20 GiB OS + 4 GiB workspace reserve (usable **104 GiB** buffer). Each Spark device also has a **code** region (64 MiB resident modules, **assumption** — GB10 I-cache unpublished) and a **scratch** region (228 KiB SMEM/block from B200 public figures, **assumption** for GB10). Expert GEMMs are sharded by **EP × TP × PP**; attention is TP×PP only (replicated across EP). Search enumerates every `EP*TP*PP=N` factorization that fits and keeps the **minimum decode-step** plan (within 10%, higher EP wins). Decode time is per-node HBM at 273 GB/s plus EP all-to-all, two TP ring all-reduces per layer, and PP P2P over ConnectX-7 200 Gb/s. Training search is joint over EP/TP/PP/DP, ZeRO 0–3, checkpoint policy, NVMe offload (ZeRO-Infinity, Spark SSD **3.5 GB/s** assumed Gen4; unpublished), and bf16 vs fp8 mixed precision. CUDA kernels are emitted for `sm_121`; cubin/SASS/regs/SMEM are **measured** with `nvcc -arch=sm_80` (CUDA 12.0 in this VM; `sm_121` needs CUDA 12.9+) when `nvcc` is on PATH.
 
 Full-size weights (~93 GB bf16 for 8x7B) are **not** materialized. Numerical check is the tiny config (same ops, seeded weights) vs an independent naïve reference. Optional `--weights` safetensors path errors clearly if the file is absent — Hugging Face transformers is **not** run in CI.
 

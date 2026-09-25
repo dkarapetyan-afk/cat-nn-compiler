@@ -520,12 +520,21 @@ fn cmd_mixtral_train_sweep(
     if let Some(p) = rows.first() {
         println!("assumptions: {}", p.assumptions);
     }
+    match catnn_compile::kernel::fd64::run_all_checks() {
+        Ok(fd) => {
+            println!();
+            print!("{}", catnn_compile::kernel::fd64::format_fd_table(&fd));
+        }
+        Err(e) => println!("fd table: {e}"),
+    }
+    let inv = catnn_compile::kernel::measure::inventory();
+    print!("{}", catnn_compile::kernel::measure::format_inventory(&inv));
     match train::mixtral_layer_timeline_excerpt() {
         Ok(ex) => print!("{ex}"),
         Err(e) => println!("timeline excerpt: {e}"),
     }
-    println!("executed: placement search + simulated timeline (CPU).");
-    println!("not executed: full-size training, GPU, nvcc cubin measurement.");
+    println!("executed: placement search + simulated timeline (CPU); f64 FD table; nvcc cubin inventory when nvcc is present.");
+    println!("not executed: full-size Mixtral training, GPU dispatch.");
     Ok(())
 }
 

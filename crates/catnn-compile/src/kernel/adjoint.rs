@@ -218,8 +218,8 @@ pub fn swiglu_backward(
     let tokens = x.data.len() / hidden;
     let mid = w1.ty.shape.dims[1];
     let xf = Tensor::from_vec(TensorType::f32([tokens, hidden]), x.data.clone())?;
-    let a = cpu::linear(&xf, w1, None)?;
-    let c = cpu::linear(&xf, w3, None)?;
+    let a = cpu::linear_seq(&xf, w1, None)?;
+    let c = cpu::linear_seq(&xf, w3, None)?;
     let mut h = a.clone();
     for i in 0..h.data.len() {
         h.data[i] = silu(a.data[i]) * c.data[i];
@@ -255,7 +255,7 @@ pub fn router_backward_ste(
     let n_exp = gate.ty.shape.dims[1];
     let tokens = x.data.len() / hidden;
     let xf = Tensor::from_vec(TensorType::f32([tokens, hidden]), x.data.clone())?;
-    let logits = cpu::linear(&xf, gate, None)?;
+    let logits = cpu::linear_seq(&xf, gate, None)?;
     let mut dlogits = Tensor::zeros(logits.ty.clone());
     for t in 0..tokens {
         let row = &logits.data[t * n_exp..(t + 1) * n_exp];
@@ -440,7 +440,7 @@ fn linear3(
     dout: usize,
 ) -> CatResult<Tensor> {
     let flat = Tensor::from_vec(TensorType::f32([b * s, din]), x.data.clone())?;
-    let y = cpu::linear(&flat, w, None)?;
+    let y = cpu::linear_seq(&flat, w, None)?;
     Tensor::from_vec(TensorType::f32([b, s, dout]), y.data)
 }
 
