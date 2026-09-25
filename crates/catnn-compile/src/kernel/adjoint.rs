@@ -918,7 +918,9 @@ pub fn adjoint_of(
             ));
         }
         OpenOp::Mix => {
-            let rhs = inputs.get(1).ok_or_else(|| CatError::Wiring("mix adjoint needs two inputs".into()))?;
+            let rhs = inputs
+                .get(1)
+                .ok_or_else(|| CatError::Wiring("mix adjoint needs two inputs".into()))?;
             let g = node.params.get("gate").map(|t| t.data[0]).unwrap_or(0.0);
             let (da, db, dg) = crate::kernel::deepseek::mix_backward(x, rhs, g, dy)?;
             let mut gt = Tensor::zeros(TensorType::f32([1]));

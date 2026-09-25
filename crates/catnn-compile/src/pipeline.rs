@@ -18,6 +18,7 @@ use catnn_core::category::{OpenOp, Rewrite};
 use catnn_core::lens::{Adam, AdamState, OptimizerKind, Sgd};
 use catnn_core::tensor::Tensor;
 use catnn_core::{Architecture, CatError, CatResult};
+use serde::{Deserialize, Serialize};
 
 use crate::ir::IrGraph;
 use crate::kernel::adjoint::{adjoint_needs_output, adjoint_of, cross_entropy, mse_loss};
@@ -29,14 +30,14 @@ use crate::schedule::{self, BufferReq, LaunchReq, ScheduleRequest, ScheduledStep
 use crate::train::TrainOptions;
 
 /// Where a value enters the loss.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum TrainTarget {
     Mse(Tensor),
     Classes(Vec<u32>),
 }
 
 /// One routed value. `hops` includes the source device and the destination.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RouteRecord {
     pub tag: String,
     pub hops: Vec<String>,
@@ -662,7 +663,8 @@ mod tests {
         assert!(a.feasible, "{}", a.rationale);
         assert!(b.feasible, "{}", b.rationale);
         assert!(b.graph.nodes.len() > a.graph.nodes.len());
-        let bytes = |s: &StagedTrain| s.devices.iter().map(|d| d.schedule.peaks.buffer).sum::<u64>();
+        let bytes =
+            |s: &StagedTrain| s.devices.iter().map(|d| d.schedule.peaks.buffer).sum::<u64>();
         assert!(bytes(&b) > bytes(&a), "mixture {} vs one {}", bytes(&b), bytes(&a));
         let graph = crate::lower::lower_architecture(&mix).unwrap();
         let mut env: std::collections::HashMap<u32, catnn_core::tensor::Tensor> =
@@ -674,11 +676,7 @@ mod tests {
                 continue;
             }
             let node = graph.node(id).unwrap();
-            let inputs: Vec<_> = graph
-                .preds(id)
-                .iter()
-                .map(|p| env[&p.0].clone())
-                .collect();
+            let inputs: Vec<_> = graph.preds(id).iter().map(|p| env[&p.0].clone()).collect();
             let y = crate::kernel::eval_cpu(node, &inputs).unwrap();
             env.insert(id.0, y);
         }

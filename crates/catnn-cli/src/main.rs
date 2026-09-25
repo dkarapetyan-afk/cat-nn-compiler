@@ -18,6 +18,7 @@ use catnn_core::tensor::Tensor;
 use catnn_core::Architecture;
 use catnn_rt::execute;
 use catnn_rt::train_on_cluster;
+use catnn_rt::{serve_member, train_attached, MemberEndpoint};
 use clap::{Parser, Subcommand};
 
 #[derive(Parser, Debug)]
@@ -97,6 +98,10 @@ enum Cmd {
         mem: Option<String>,
         #[arg(long)]
         mem_per_device: Option<String>,
+        /// Already-running members, `node0=127.0.0.1:7401,node1=127.0.0.1:7402`.
+        /// Omit to boot one member per node in this process.
+        #[arg(long)]
+        members: Option<String>,
     },
     /// Place Mixtral *training* on N Sparks (bf16+fp32 Adam, optional fp8).
     MixtralTrainSweep {
@@ -130,6 +135,16 @@ enum Cmd {
         #[arg(long, default_value_t = 7)]
         seed: u64,
     },
+    /// Listen as one cluster node. The coordinator installs placement and
+    /// drives waves; tensors for other nodes are sent on this socket.
+    Member {
+        /// Node id, matching a node in the cluster spec (`node0`, `spark0`, …).
+        #[arg(long)]
+        node: String,
+        /// `host:port`. Port 0 asks the OS for a free port.
+        #[arg(long, default_value = "127.0.0.1:0")]
+        bind: String,
+    },
 }
 
 fn main() -> Result<()> {
@@ -147,16 +162,24 @@ fn main() -> Result<()> {
         Cmd::Inspect { spec, cluster, mem, mem_per_device } => {
             cmd_inspect(&spec, &cluster, mem.as_deref(), mem_per_device.as_deref())
         }
-        Cmd::Train { spec, cluster, steps, opt, lr, seed, mem, mem_per_device } => cmd_train(
-            &spec,
-            &cluster,
-            steps,
-            &opt,
-            lr,
-            seed,
-            mem.as_deref(),
-            mem_per_device.as_deref(),
-        ),
+        Cmd::Train { spec, cluster, steps, opt, lr, seed, mem, mem_per_device, members } => {
+            cmd_train(
+                &spec,
+                &cluster,
+                steps,
+                &opt,
+                lr,
+                seed,
+                mem.as_deref(),
+                mem_per_device.as_deref(),
+                members.as_deref(),
+            )
+        }
+        Cmd::Member { node, bind } => {
+            println!("member {node} binding {bind}");
+            serve_member(&bind, &node)?;
+            Ok(())
+        }
         Cmd::MixtralSweep { model, context, batch, weights } => {
             cmd_mixtral_sweep(&model, context, batch, weights.as_deref())
         }
@@ -222,18 +245,12 @@ fn load_arch(spec: &str) -> Result<Architecture> {
             4,
             true,
         )?),
-        "deepseek-connected" => Ok(catnn_core::deepseek_connected(
-            &catnn_core::DeepSeekV3Config::tiny(),
-            2,
-            4,
-            true,
-        )?),
-        "deepseek-mixture" => Ok(catnn_core::deepseek_mixture(
-            &catnn_core::DeepSeekV3Config::tiny(),
-            2,
-            4,
-            true,
-        )?),
+        "deepseek-connected" => {
+            Ok(catnn_core::deepseek_connected(&catnn_core::DeepSeekV3Config::tiny(), 2, 4, true)?)
+        }
+        "deepseek-mixture" => {
+            Ok(catnn_core::deepseek_mixture(&catnn_core::DeepSeekV3Config::tiny(), 2, 4, true)?)
+        }
         path => {
             let src = fs::read_to_string(path).with_context(|| format!("read spec {path}"))?;
             let parsed: NetworkSpec = parse_auto(&src, Some(path))?;
@@ -483,6 +500,23 @@ fn cmd_inspect(
     Ok(())
 }
 
+fn parse_members(spec: &str) -> Result<Vec<MemberEndpoint>> {
+    let mut out = Vec::new();
+    for part in spec.split(',').filter(|s| !s.trim().is_empty()) {
+        let (node, addr) = part
+            .split_once('=')
+            .with_context(|| format!("member {part} should be node=host:port"))?;
+        out.push(MemberEndpoint {
+            node_id: node.trim().to_string(),
+            addr: addr.trim().to_string(),
+        });
+    }
+    if out.is_empty() {
+        bail!("--members was empty");
+    }
+    Ok(out)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn cmd_train(
     spec: &str,
@@ -493,6 +527,7 @@ fn cmd_train(
     seed: u64,
     mem: Option<&str>,
     mem_per_device: Option<&str>,
+    members: Option<&str>,
 ) -> Result<()> {
     let opts = TrainOptions {
         steps,
@@ -506,7 +541,12 @@ fn cmd_train(
     if let Some(b) = opts.budget {
         cluster = cluster.with_budget(b);
     }
-    let report = train_on_cluster(&arch, &cluster, &opts)?;
+    let report = if let Some(members) = members {
+        let endpoints = parse_members(members)?;
+        train_attached(&arch, &cluster, &opts, &endpoints)?
+    } else {
+        train_on_cluster(&arch, &cluster, &opts)?
+    };
     println!("train {spec} cluster={cluster_name} opt={opt} steps={steps} lr={lr}");
     println!("placement:");
     for (op, dev) in &report.placement {
@@ -538,7 +578,7 @@ fn cmd_train(
     println!("final params checksum: {:016x}", report.final_params_checksum);
     println!("messages: {} bytes_moved: {}", report.messages, report.bytes_moved);
     println!(
-        "executed: forward, adjoint, and {opt} updates. Cross-device tensors followed cluster links."
+        "executed: forward, adjoint, and {opt} updates. A member on each node received the placement; cross-node tensors were TCP messages along cluster links."
     );
     println!("not executed: GPU dispatch, full-size Mixtral weights, HF reference.");
     Ok(())

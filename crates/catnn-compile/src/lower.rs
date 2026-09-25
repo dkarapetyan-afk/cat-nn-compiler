@@ -87,7 +87,10 @@ pub fn lower_architecture(arch: &Architecture) -> CatResult<IrGraph> {
                 next_id += 1;
             }
             let mix_id = NodeId(next_id);
-            g.nodes.insert(next_id, lower_component(&parts[left + right], mix_id, arch.materialize_params)?);
+            g.nodes.insert(
+                next_id,
+                lower_component(&parts[left + right], mix_id, arch.materialize_params)?,
+            );
             g.edges.push(IrEdge {
                 src: left_out,
                 dst: mix_id,

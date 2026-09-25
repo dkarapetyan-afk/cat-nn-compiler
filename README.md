@@ -105,15 +105,25 @@ To attach a real GPU later: construct a wgpu device, load the already-generated
 
 ## Runtime
 
+Each cluster node is a member that listens for TCP connections. The
+coordinator is the control plane: it dials every member, installs that
+node's slice of the placement, and runs bulk-synchronous waves. A tensor
+that crosses nodes is a length-prefixed message to the member that owns
+the next hop, acknowledged before the sender reports the wave. Intra-node
+hops stay inside the member and apply on the next wave. The consumer
+reads the delivered tensor. There is no path when the topology does not
+connect the two nodes, and staging fails instead of inventing one.
+
+`catnn train` and `catnn run` boot one member per node in-process and talk
+to those sockets. To run members as separate processes:
+
+```
+catnn member --node node0 --bind 127.0.0.1:7401
+catnn member --node node1 --bind 127.0.0.1:7402
+catnn train mlp --cluster demo --members node0=127.0.0.1:7401,node1=127.0.0.1:7402
+```
+
 - One `DeviceHandler` per device, each accumulating a `LocalSection`.
-- A cross-device tensor is routed along the cluster's directed links
-  (intra-node hops use the implicit device link). Device threads run the
-  ops whose inputs have arrived and read the tensor the route delivered.
-  An intermediate node relays. There is no path when the topology does
-  not connect the two nodes.
-- `transfer::spawn_tcp_node` / `send_tcp` is a length-prefixed localhost
-  protocol for a real multi-process stand-in; the default `run` path uses
-  in-process hops along the same routes.
 - After execution, local sections are glued. Incompatible overlaps fail
   descent (see `sheaf` tests).
 

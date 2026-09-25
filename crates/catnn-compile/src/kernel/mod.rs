@@ -129,9 +129,7 @@ pub fn eval_cpu(node: &IrNode, inputs: &[Tensor]) -> CatResult<Tensor> {
         ),
         OpenOp::LmHead { vocab, .. } => moe::lm_head(x, node.params.get("w").unwrap(), *vocab),
         OpenOp::Router { .. } => Ok(x.clone()),
-        OpenOp::Mla {
-            n_heads, qk_nope, qk_rope, v_dim, rope_theta, ..
-        } => deepseek::mla(
+        OpenOp::Mla { n_heads, qk_nope, qk_rope, v_dim, rope_theta, .. } => deepseek::mla(
             x,
             node.params.get("w_dq").unwrap(),
             node.params.get("q_norm").unwrap(),
@@ -148,7 +146,15 @@ pub fn eval_cpu(node: &IrNode, inputs: &[Tensor]) -> CatResult<Tensor> {
             *v_dim,
             *rope_theta as f64,
         ),
-        OpenOp::DeepSeekMoe { top_k, n_group, topk_group, n_routed, n_shared, routed_scale_milli, .. } => {
+        OpenOp::DeepSeekMoe {
+            top_k,
+            n_group,
+            topk_group,
+            n_routed,
+            n_shared,
+            routed_scale_milli,
+            ..
+        } => {
             let gate = node.params.get("gate").unwrap();
             let mut shared = Vec::new();
             for s in 0..*n_shared {
@@ -178,7 +184,9 @@ pub fn eval_cpu(node: &IrNode, inputs: &[Tensor]) -> CatResult<Tensor> {
             )
         }
         OpenOp::Mix => {
-            let rhs = inputs.get(1).ok_or_else(|| catnn_core::CatError::Wiring("mix needs two inputs".into()))?;
+            let rhs = inputs
+                .get(1)
+                .ok_or_else(|| catnn_core::CatError::Wiring("mix needs two inputs".into()))?;
             let g = node.params.get("gate").map(|t| t.data[0]).unwrap_or(0.0);
             deepseek::mix(x, rhs, g)
         }
@@ -234,7 +242,7 @@ pub fn eval_reference(node: &IrNode, inputs: &[Tensor]) -> CatResult<Tensor> {
         | OpenOp::SwiGlu { .. }
         | OpenOp::MoE { .. }
         | OpenOp::GqaAttention { .. }
-        |         OpenOp::LmHead { .. }
+        | OpenOp::LmHead { .. }
         | OpenOp::Router { .. }
         | OpenOp::Mla { .. }
         | OpenOp::DeepSeekMoe { .. }

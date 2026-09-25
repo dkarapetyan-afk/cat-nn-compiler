@@ -85,7 +85,8 @@ pub fn mla(
         for head in 0..n_heads {
             let mut slice = qu.data[head * q_head..(head + 1) * q_head].to_vec();
             rope_inplace(&mut slice[qk_nope..], pos, rope_theta);
-            q_heads[t * n_heads * q_head + head * q_head..(t * n_heads * q_head + (head + 1) * q_head)]
+            q_heads[t * n_heads * q_head + head * q_head
+                ..(t * n_heads * q_head + (head + 1) * q_head)]
                 .copy_from_slice(&slice);
         }
         let kl = rms_vec(
@@ -165,7 +166,9 @@ fn route_sigmoid(
         group_score[g] = scores[g * per..(g + 1) * per].iter().copied().fold(0.0, f32::max);
     }
     let mut groups: Vec<usize> = (0..n_group).collect();
-    groups.sort_by(|&a, &b| group_score[b].partial_cmp(&group_score[a]).unwrap_or(std::cmp::Ordering::Equal));
+    groups.sort_by(|&a, &b| {
+        group_score[b].partial_cmp(&group_score[a]).unwrap_or(std::cmp::Ordering::Equal)
+    });
     let keep = &groups[..topk_group.min(n_group)];
     let mut cand: Vec<usize> = Vec::new();
     for &g in keep {
@@ -235,7 +238,12 @@ pub fn mix(a: &Tensor, b: &Tensor, gate: f32) -> CatResult<Tensor> {
     Ok(y)
 }
 
-pub fn mix_backward(a: &Tensor, b: &Tensor, gate: f32, dy: &Tensor) -> CatResult<(Tensor, Tensor, f32)> {
+pub fn mix_backward(
+    a: &Tensor,
+    b: &Tensor,
+    gate: f32,
+    dy: &Tensor,
+) -> CatResult<(Tensor, Tensor, f32)> {
     let s = sigmoid(gate);
     let mut da = dy.clone();
     let mut db = dy.clone();

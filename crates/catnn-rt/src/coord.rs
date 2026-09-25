@@ -1,16 +1,13 @@
-//! Bulk-synchronous cluster coordination.
+//! Per-device step of a bulk-synchronous wave.
 //!
-//! Each wave, every device thread runs the ops whose inputs are already
-//! in its store and emits tensors that have to leave the device. The host
-//! then walks each emitted value one hop along the staged route. A hop
-//! whose remainder is a single device is delivered into that device's
-//! store; a longer remainder is a relay inbox on the intermediate device,
-//! which the next wave forwards. Forward values, adjoints, and parameter
-//! updates all use this path. A device reads the tensor the route delivered,
-//! not a side copy made before the send.
+//! The network coordinator in [`crate::dist`] owns the barrier. It sends
+//! one `Wave` to every node member; the member runs the device threads
+//! below and returns the tensors that have to leave. A hop whose remainder
+//! is a single device is delivered into that device's store; a longer
+//! remainder is a relay inbox. Forward values, adjoints, and parameter
+//! updates all use this path. A device reads the tensor the route delivered.
 
 use std::collections::{HashMap, HashSet};
-use std::thread;
 use std::time::Instant;
 
 use catnn_compile::ir::{IrGraph, NodeId};
@@ -20,7 +17,7 @@ use catnn_compile::pipeline::{
 };
 use catnn_compile::train::TrainOptions;
 use catnn_compile::Compiled;
-use catnn_core::architecture::{DeviceKind, MemoryRegionKind, Placement};
+use catnn_core::architecture::{MemoryRegionKind, Placement};
 use catnn_core::lens::{AdamState, OptimizerKind};
 use catnn_core::tensor::Tensor;
 use catnn_core::{Architecture, CatError, CatResult};
@@ -30,30 +27,30 @@ use crate::handler::DeviceHandler;
 use crate::sheaf::LocalSection;
 
 #[derive(Clone)]
-struct Envelope {
-    tag: String,
-    tensor: Tensor,
+pub(crate) struct Envelope {
+    pub(crate) tag: String,
+    pub(crate) tensor: Tensor,
     /// Hops still to visit, including the device that should receive this
     /// envelope next.
-    rest: Vec<String>,
+    pub(crate) rest: Vec<String>,
 }
 
-struct DeviceRt {
-    tensors: HashMap<String, Tensor>,
-    params: HashMap<u32, IndexMap<String, Tensor>>,
-    adam: HashMap<(u32, String), AdamState>,
-    pending: HashMap<(u32, String), Tensor>,
-    fw_done: HashSet<u32>,
-    bw_done: HashSet<u32>,
-    loss_done: bool,
-    updates_done: bool,
-    dropped: bool,
-    inbox: Vec<Envelope>,
-    loss: Option<f32>,
-    target: Option<TrainTarget>,
-    owned: Vec<u32>,
-    compute: Vec<u32>,
-    owns_output: bool,
+pub(crate) struct DeviceRt {
+    pub(crate) tensors: HashMap<String, Tensor>,
+    pub(crate) params: HashMap<u32, IndexMap<String, Tensor>>,
+    pub(crate) adam: HashMap<(u32, String), AdamState>,
+    pub(crate) pending: HashMap<(u32, String), Tensor>,
+    pub(crate) fw_done: HashSet<u32>,
+    pub(crate) bw_done: HashSet<u32>,
+    pub(crate) loss_done: bool,
+    pub(crate) updates_done: bool,
+    pub(crate) dropped: bool,
+    pub(crate) inbox: Vec<Envelope>,
+    pub(crate) loss: Option<f32>,
+    pub(crate) target: Option<TrainTarget>,
+    pub(crate) owned: Vec<u32>,
+    pub(crate) compute: Vec<u32>,
+    pub(crate) owns_output: bool,
 }
 
 /// Result of executing a staged pipeline.
@@ -123,226 +120,72 @@ fn execute_staged(
             devices: staged.devices,
         });
     }
-    let (input, target) = pipeline::example_batch(&staged.graph, opts.seed)?;
-    let input_id = staged.graph.inputs[0].0;
-    let output_id = staged.graph.outputs.last().unwrap().0;
-    let mut states: HashMap<String, DeviceRt> = HashMap::new();
-    let mut handlers: HashMap<String, DeviceHandler> = HashMap::new();
-    for (_, dev) in cluster.devices() {
-        let owned: Vec<u32> = staged
-            .graph
-            .nodes
-            .values()
-            .filter(|n| staged.placement.get(&n.name) == Some(dev.id.as_str()))
-            .map(|n| n.id.0)
-            .collect();
-        let compute: Vec<u32> = owned.iter().copied().filter(|id| *id != input_id).collect();
-        let out_name = &staged.graph.node(NodeId(output_id)).unwrap().name;
-        let owns_output = staged.placement.get(out_name) == Some(dev.id.as_str());
-        states.insert(
-            dev.id.clone(),
-            DeviceRt {
-                tensors: HashMap::new(),
-                params: HashMap::new(),
-                adam: HashMap::new(),
-                pending: HashMap::new(),
-                fw_done: HashSet::new(),
-                bw_done: HashSet::new(),
-                loss_done: !owns_output,
-                updates_done: compute.is_empty(),
-                dropped: false,
-                inbox: vec![],
-                loss: None,
-                target: None,
-                owned,
-                compute,
-                owns_output,
-            },
-        );
-        handlers.insert(dev.id.clone(), DeviceHandler::new(dev.clone()));
-    }
-    for node in staged.graph.nodes.values() {
-        let dev = staged.placement.get(&node.name).unwrap();
-        states.get_mut(dev).unwrap().params.insert(node.id.0, node.params.clone());
-    }
-
-    let mut losses = Vec::new();
-    let mut messages = 0u64;
-    let mut bytes_moved = 0u64;
-    let order: Vec<u32> = staged.graph.topo()?.into_iter().map(|id| id.0).collect();
-    let limit =
-        (order.len() * 8 + staged.routes.iter().map(|r| r.hops.len()).sum::<usize>() + 8).max(8);
-
-    for _step in 0..opts.steps {
-        for state in states.values_mut() {
-            state.tensors.clear();
-            state.pending.clear();
-            state.fw_done.clear();
-            state.bw_done.clear();
-            state.inbox.clear();
-            state.loss = None;
-            state.dropped = false;
-            state.loss_done = !state.owns_output;
-            state.updates_done = state.compute.is_empty();
-        }
-        let input_dev = staged
-            .placement
-            .get(&staged.graph.node(NodeId(input_id)).unwrap().name)
-            .unwrap()
-            .to_string();
-        states
-            .get_mut(&input_dev)
-            .unwrap()
-            .tensors
-            .insert(format!("act:{input_id}"), input.clone());
-        let output_dev = staged
-            .placement
-            .get(&staged.graph.node(NodeId(output_id)).unwrap().name)
-            .unwrap()
-            .to_string();
-        states.get_mut(&output_dev).unwrap().target = Some(target.clone());
-
-        let mut settled = false;
-        for _wave in 0..limit {
-            let fired = run_training_wave(
-                &staged,
-                &order,
-                opts,
-                &mut states,
-                &mut handlers,
-                &mut messages,
-                &mut bytes_moved,
-            )?;
-            let inbox_empty = states.values().all(|s| s.inbox.is_empty());
-            let ready = states
-                .values()
-                .all(|s| s.updates_done && s.owned.iter().all(|id| s.fw_done.contains(id)));
-            if ready && inbox_empty {
-                settled = true;
-                break;
-            }
-            if fired == 0 && inbox_empty {
-                let stuck: Vec<String> = states
-                    .iter()
-                    .filter(|(_, s)| {
-                        !s.updates_done || s.owned.iter().any(|id| !s.fw_done.contains(id))
-                    })
-                    .map(|(d, _)| d.clone())
-                    .collect();
-                return Err(CatError::Wiring(format!(
-                    "training coordination stalled; devices still waiting: {}",
-                    stuck.join(", ")
-                )));
-            }
-        }
-        if !settled {
-            return Err(CatError::Wiring("training exceeded the coordination wave limit".into()));
-        }
-        let loss = states.get(&output_dev).and_then(|s| s.loss).ok_or_else(|| {
-            CatError::Wiring("output device finished the step without a loss".into())
-        })?;
-        losses.push(loss);
-    }
-
-    let mut checksum = 0u64;
-    let mut ids: Vec<u32> = staged.graph.nodes.keys().copied().collect();
-    ids.sort_unstable();
-    for id in ids {
-        let dev = staged.placement.get(&staged.graph.node(NodeId(id)).unwrap().name).unwrap();
-        if let Some(params) = states.get(dev).and_then(|s| s.params.get(&id)) {
-            for tensor in params.values() {
-                checksum ^= tensor.checksum();
-            }
-        }
-    }
-
+    let net = crate::dist::run_training(cluster, opts, &staged, None)?;
     Ok(ClusterTrainReport {
-        losses,
-        final_params_checksum: checksum,
+        losses: net.losses,
+        final_params_checksum: net.checksum,
         feasible: true,
         rationale: staged.rationale,
         overflow_device: None,
         overflow_region: None,
         routes: staged.routes,
         placement: placement_pairs,
-        messages,
-        bytes_moved,
+        messages: net.messages,
+        bytes_moved: net.bytes_moved,
         devices: staged.devices,
     })
 }
 
-fn run_training_wave(
-    staged: &StagedTrain,
-    order: &[u32],
+pub(crate) fn execute_attached(
+    cluster: &catnn_core::architecture::Cluster,
     opts: &TrainOptions,
-    states: &mut HashMap<String, DeviceRt>,
-    handlers: &mut HashMap<String, DeviceHandler>,
-    messages: &mut u64,
-    bytes_moved: &mut u64,
-) -> CatResult<usize> {
-    let ids: Vec<String> = {
-        let mut v: Vec<String> = states.keys().cloned().collect();
-        v.sort();
-        v
-    };
-    let mut fired = 0usize;
-    let mut outgoing_all: Vec<Envelope> = Vec::new();
-    thread::scope(|scope| -> CatResult<()> {
-        let mut joins = Vec::new();
-        for id in &ids {
-            let state = states.remove(id).unwrap();
-            let handler = handlers.remove(id).unwrap();
-            let device = id.clone();
-            let graph = &staged.graph;
-            let placement = &staged.placement;
-            let routes = &staged.routes;
-            let checkpointed = staged
-                .devices
-                .iter()
-                .find(|d| d.device == device)
-                .map(|d| d.checkpointed.as_slice())
-                .unwrap_or(&[]);
-            let opt = opts.opt;
-            let lr = opts.lr;
-            joins.push(scope.spawn(move || {
-                training_device(
-                    device,
-                    state,
-                    handler,
-                    graph,
-                    placement,
-                    routes,
-                    checkpointed,
-                    order,
-                    opt,
-                    lr,
-                )
-            }));
-        }
-        for join in joins {
-            let out = join.join().map_err(|_| CatError::Io("device thread panicked".into()))??;
-            fired += out.fired + out.relayed;
-            outgoing_all.extend(out.outgoing);
-            states.insert(out.device.clone(), out.state);
-            handlers.insert(out.device, out.handler);
-        }
-        Ok(())
-    })?;
-    deliver_all(outgoing_all, states, messages, bytes_moved)?;
-    Ok(fired)
+    staged: StagedTrain,
+    members: Option<&[crate::dist::MemberEndpoint]>,
+) -> CatResult<ClusterTrainReport> {
+    let placement_pairs: Vec<(String, String)> =
+        staged.placement.assign.iter().map(|(op, dev)| (op.clone(), dev.clone())).collect();
+    if !staged.feasible {
+        return Ok(ClusterTrainReport {
+            losses: vec![],
+            final_params_checksum: 0,
+            feasible: false,
+            rationale: staged.rationale,
+            overflow_device: staged.overflow_device,
+            overflow_region: staged.overflow_region,
+            routes: staged.routes,
+            placement: placement_pairs,
+            messages: 0,
+            bytes_moved: 0,
+            devices: staged.devices,
+        });
+    }
+    let net = crate::dist::run_training(cluster, opts, &staged, members)?;
+    Ok(ClusterTrainReport {
+        losses: net.losses,
+        final_params_checksum: net.checksum,
+        feasible: true,
+        rationale: staged.rationale,
+        overflow_device: None,
+        overflow_region: None,
+        routes: staged.routes,
+        placement: placement_pairs,
+        messages: net.messages,
+        bytes_moved: net.bytes_moved,
+        devices: staged.devices,
+    })
 }
 
-struct TrainWave {
-    device: String,
-    state: DeviceRt,
-    handler: DeviceHandler,
-    outgoing: Vec<Envelope>,
-    fired: usize,
-    relayed: usize,
+pub(crate) struct TrainWave {
+    pub(crate) device: String,
+    pub(crate) state: DeviceRt,
+    pub(crate) handler: DeviceHandler,
+    pub(crate) outgoing: Vec<Envelope>,
+    pub(crate) fired: usize,
+    pub(crate) relayed: usize,
 }
 
 #[allow(clippy::too_many_arguments)]
-fn training_device(
+pub(crate) fn training_device(
     device: String,
     mut state: DeviceRt,
     mut handler: DeviceHandler,
@@ -684,7 +527,7 @@ fn route_between(
         })
 }
 
-fn deliver_all(
+pub(crate) fn deliver_all(
     outgoing: Vec<Envelope>,
     states: &mut HashMap<String, DeviceRt>,
     messages: &mut u64,
@@ -712,11 +555,7 @@ fn deliver_all(
 /// Forward execution. Device threads run placed kernels; tensors that cross
 /// devices move along [`route`] and are what the consumer reads.
 pub fn run_forward(compiled: &Compiled, input: &Tensor) -> CatResult<ForwardRun> {
-    let wall = Instant::now();
     let graph = &compiled.graph;
-    let order: Vec<u32> = graph.topo()?.into_iter().map(|id| id.0).collect();
-    let input_id = graph.inputs[0].0;
-    let output_id = graph.outputs.last().unwrap().0;
     let mut routes: Vec<RouteRecord> = Vec::new();
     for edge in &graph.edges {
         let src = graph.node(edge.src).unwrap();
@@ -735,146 +574,22 @@ pub fn run_forward(compiled: &Compiled, input: &Tensor) -> CatResult<ForwardRun>
             });
         }
     }
-    let mut states: HashMap<String, DeviceRt> = HashMap::new();
-    let mut handlers: HashMap<String, DeviceHandler> = HashMap::new();
-    let mut gpu_devs: HashSet<String> = HashSet::new();
-    for (_, dev) in compiled.cluster.devices() {
-        if matches!(dev.kind, DeviceKind::Gpu | DeviceKind::Accelerator) {
-            gpu_devs.insert(dev.id.clone());
-        }
-        let owned: Vec<u32> = graph
-            .nodes
-            .values()
-            .filter(|n| placed(compiled, &n.name) == dev.id)
-            .map(|n| n.id.0)
-            .collect();
-        states.insert(
-            dev.id.clone(),
-            DeviceRt {
-                tensors: HashMap::new(),
-                params: HashMap::new(),
-                adam: HashMap::new(),
-                pending: HashMap::new(),
-                fw_done: HashSet::new(),
-                bw_done: HashSet::new(),
-                loss_done: true,
-                updates_done: true,
-                dropped: true,
-                inbox: vec![],
-                loss: None,
-                target: None,
-                owned,
-                compute: vec![],
-                owns_output: false,
-            },
-        );
-        handlers.insert(dev.id.clone(), DeviceHandler::new(dev.clone()));
-    }
-    for node in graph.nodes.values() {
-        let dev = placed(compiled, &node.name);
-        states.get_mut(dev).unwrap().params.insert(node.id.0, node.params.clone());
-    }
-    let input_dev = placed(compiled, &graph.node(NodeId(input_id)).unwrap().name).to_string();
-    states.get_mut(&input_dev).unwrap().tensors.insert(format!("act:{input_id}"), input.clone());
-
-    let mut messages = 0u64;
-    let mut bytes_moved = 0u64;
-    let mut used_gpu = false;
-    let mut occupancy: HashMap<String, f64> = HashMap::new();
-    let limit = (order.len() * 4 + routes.iter().map(|r| r.hops.len()).sum::<usize>() + 4).max(4);
-    let mut settled = false;
-    for _ in 0..limit {
-        let ids: Vec<String> = {
-            let mut v: Vec<String> = states.keys().cloned().collect();
-            v.sort();
-            v
-        };
-        let mut outgoing_all = Vec::new();
-        let mut fired = 0usize;
-        thread::scope(|scope| -> CatResult<()> {
-            let mut joins = Vec::new();
-            for id in &ids {
-                let state = states.remove(id).unwrap();
-                let handler = handlers.remove(id).unwrap();
-                let device = id.clone();
-                let is_gpu = gpu_devs.contains(&device);
-                let routes = &routes;
-                let order = &order;
-                joins.push(scope.spawn(move || {
-                    forward_device(
-                        device,
-                        state,
-                        handler,
-                        graph,
-                        &compiled.realization.placement,
-                        compiled.cluster.default_device().id.as_str(),
-                        routes,
-                        order,
-                        is_gpu,
-                    )
-                }));
-            }
-            for join in joins {
-                let out =
-                    join.join().map_err(|_| CatError::Io("device thread panicked".into()))??;
-                fired += out.fired + out.relayed;
-                used_gpu |= out.used_gpu;
-                *occupancy.entry(out.device.clone()).or_insert(0.0) += out.occupancy_ms;
-                outgoing_all.extend(out.outgoing);
-                states.insert(out.device.clone(), out.state);
-                handlers.insert(out.device, out.handler);
-            }
-            Ok(())
-        })?;
-        deliver_all(outgoing_all, &mut states, &mut messages, &mut bytes_moved)?;
-        let done = states.values().all(|s| s.owned.iter().all(|id| s.fw_done.contains(id)));
-        let inbox_empty = states.values().all(|s| s.inbox.is_empty());
-        if done && inbox_empty {
-            settled = true;
-            break;
-        }
-        if fired == 0 && inbox_empty {
-            return Err(CatError::Wiring(
-                "forward coordination stalled before every placed op ran".into(),
-            ));
-        }
-    }
-    if !settled {
-        return Err(CatError::Wiring("forward exceeded the coordination wave limit".into()));
-    }
-    let output_dev = placed(compiled, &graph.node(NodeId(output_id)).unwrap().name);
-    let output = states
-        .get(output_dev)
-        .and_then(|s| s.tensors.get(&format!("act:{output_id}")).cloned())
-        .ok_or_else(|| CatError::Wiring("output device has no activation".into()))?;
-    let mut sections: Vec<LocalSection> = handlers.into_values().map(|h| h.section).collect();
-    sections.sort_by(|a, b| a.device.cmp(&b.device));
-    let mut occ: Vec<(String, f64)> = occupancy.into_iter().collect();
-    occ.sort_by(|a, b| a.0.cmp(&b.0));
-    Ok(ForwardRun {
-        output,
-        bytes_moved,
-        messages,
-        sections,
-        used_gpu_fallback: used_gpu,
-        occupancy: occ,
-        latency_ms: wall.elapsed().as_secs_f64() * 1e3,
-    })
+    crate::dist::run_forward(compiled, input, routes)
 }
 
-struct FwdWave {
-    device: String,
-    state: DeviceRt,
-    handler: DeviceHandler,
-    outgoing: Vec<Envelope>,
-    fired: usize,
-    relayed: usize,
-    used_gpu: bool,
-    occupancy_ms: f64,
+pub(crate) struct FwdWave {
+    pub(crate) device: String,
+    pub(crate) state: DeviceRt,
+    pub(crate) handler: DeviceHandler,
+    pub(crate) outgoing: Vec<Envelope>,
+    pub(crate) fired: usize,
+    pub(crate) relayed: usize,
+    pub(crate) used_gpu: bool,
+    pub(crate) occupancy_ms: f64,
 }
 
 #[allow(clippy::too_many_arguments)]
-fn forward_device(
+pub(crate) fn forward_device(
     device: String,
     mut state: DeviceRt,
     mut handler: DeviceHandler,

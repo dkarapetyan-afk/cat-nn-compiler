@@ -2,10 +2,13 @@
 
 pub mod adapt;
 pub mod coord;
+pub mod dist;
 pub mod handler;
 pub mod scheduler;
 pub mod sheaf;
 pub mod transfer;
+
+pub use dist::{serve_member, train_attached, MemberEndpoint};
 
 pub use adapt::{adapt_once, adapt_optic, AdaptStep};
 pub use coord::{train_on_cluster, train_placed, ClusterTrainReport};
