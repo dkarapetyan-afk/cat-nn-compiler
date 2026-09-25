@@ -209,14 +209,14 @@ mod tests {
             1 << 20,
         );
         let pulled = reindex(&f, &r).unwrap();
-        assert!(pulled.cells.iter().any(|c| matches!(
-            c.rewrite,
-            crate::category::Rewrite::Recompute { .. }
-        )));
-        assert!(pulled.cells.iter().any(|c| matches!(
-            c.rewrite,
-            crate::category::Rewrite::Offload { .. }
-        )));
+        assert!(pulled
+            .cells
+            .iter()
+            .any(|c| matches!(c.rewrite, crate::category::Rewrite::Recompute { .. })));
+        assert!(pulled
+            .cells
+            .iter()
+            .any(|c| matches!(c.rewrite, crate::category::Rewrite::Offload { .. })));
     }
 
     #[test]
@@ -230,14 +230,14 @@ mod tests {
             4 << 20,
         );
         let pulled = reindex(&f, &r).unwrap();
-        assert!(pulled.cells.iter().any(|c| matches!(
-            c.rewrite,
-            crate::category::Rewrite::KernelResidency { .. }
-        )));
-        assert!(pulled.cells.iter().any(|c| matches!(
-            c.rewrite,
-            crate::category::Rewrite::FuseCode { .. }
-        )));
+        assert!(pulled
+            .cells
+            .iter()
+            .any(|c| matches!(c.rewrite, crate::category::Rewrite::KernelResidency { .. })));
+        assert!(pulled
+            .cells
+            .iter()
+            .any(|c| matches!(c.rewrite, crate::category::Rewrite::FuseCode { .. })));
     }
 
     #[test]

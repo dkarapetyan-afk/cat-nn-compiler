@@ -56,6 +56,28 @@ impl DeviceHandler {
         Ok(y)
     }
 
+    /// Record a kernel span without executing it. The adjoint is a separate
+    /// Rust function from the forward kernel; the span is the schedule entry.
+    pub fn note_kernel(&mut self, name: &str, checksum: u64) {
+        let t0 = self.now_ns();
+        self.section.push(Event {
+            t: t0,
+            op: name.to_string(),
+            device: self.device.id.clone(),
+            kind: EventKind::KernelStart,
+            checksum: 0,
+        });
+        let t1 = self.now_ns().max(t0 + 1);
+        self.section.push(Event {
+            t: t1,
+            op: name.to_string(),
+            device: self.device.id.clone(),
+            kind: EventKind::KernelEnd,
+            checksum,
+        });
+        self.section.interval.end = self.section.interval.end.max(t1 + 1);
+    }
+
     pub fn record_transfer(&mut self, tag: &str, bytes_checksum: u64, start: bool) {
         let t = self.now_ns();
         self.section.push(Event {

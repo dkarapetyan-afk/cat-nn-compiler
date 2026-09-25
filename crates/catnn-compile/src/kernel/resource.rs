@@ -48,7 +48,8 @@ impl KernelResource {
     pub fn scratch_bytes(&self) -> u64 {
         self.static_smem_bytes
             + self.dynamic_smem_bytes
-            + u64::from(self.registers_per_thread) * 4
+            + u64::from(self.registers_per_thread)
+                * 4
                 * u64::from(self.launch.block[0] * self.launch.block[1] * self.launch.block[2])
     }
 
@@ -56,7 +57,12 @@ impl KernelResource {
         self.code_bytes + self.launch_arg_bytes
     }
 
-    pub fn with_buffers(mut self, reads: Vec<BufferUse>, writes: Vec<BufferUse>, temps: Vec<BufferUse>) -> Self {
+    pub fn with_buffers(
+        mut self,
+        reads: Vec<BufferUse>,
+        writes: Vec<BufferUse>,
+        temps: Vec<BufferUse>,
+    ) -> Self {
         self.reads = reads;
         self.writes = writes;
         self.temps = temps;
@@ -101,7 +107,11 @@ fn cuda_code_bytes(k: &CudaKernel) -> (u64, String) {
             m.cubin_bytes,
             format!(
                 "measured cubin {} B, {} regs, smem {} B; compiled -arch={} ({})",
-                m.cubin_bytes, m.registers, m.smem_bytes, m.arch, crate::kernel::measure::MEASURE_ARCH_NOTE
+                m.cubin_bytes,
+                m.registers,
+                m.smem_bytes,
+                m.arch,
+                crate::kernel::measure::MEASURE_ARCH_NOTE
             ),
         )
     } else {

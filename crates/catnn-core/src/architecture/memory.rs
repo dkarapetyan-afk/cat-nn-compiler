@@ -335,9 +335,8 @@ impl MemoryBudget {
                     other => return Err(CatError::Parse(format!("unknown memory region {other}"))),
                 }
             }
-            let buffer = buffer.ok_or_else(|| {
-                CatError::Parse("structured --mem needs a buffer=… entry".into())
-            })?;
+            let buffer = buffer
+                .ok_or_else(|| CatError::Parse("structured --mem needs a buffer=… entry".into()))?;
             Ok(Self { code, buffer, scratch })
         } else {
             Ok(Self::buffer_only(parse_bytes(t)?))
@@ -367,10 +366,7 @@ pub fn parse_bytes(s: &str) -> CatResult<u64> {
     } else {
         (lower.as_str(), 1)
     };
-    let v: f64 = num
-        .trim()
-        .parse()
-        .map_err(|_| CatError::Parse(format!("bad memory size {s}")))?;
+    let v: f64 = num.trim().parse().map_err(|_| CatError::Parse(format!("bad memory size {s}")))?;
     if v < 0.0 {
         return Err(CatError::Parse("negative memory".into()));
     }

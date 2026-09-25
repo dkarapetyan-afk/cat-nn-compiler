@@ -182,13 +182,7 @@ pub fn spark_cluster(n: usize, topology: SparkTopology) -> CatResult<Cluster> {
             remote.bytes = spec.memory_bytes.saturating_mul((n - 1) as u64);
         }
     }
-    Ok(Cluster {
-        name: format!("dgx-spark-N{n}-{tag}"),
-        nodes,
-        links,
-        memory,
-        budget: None,
-    })
+    Ok(Cluster { name: format!("dgx-spark-N{n}-{tag}"), nodes, links, memory, budget: None })
 }
 
 #[cfg(test)]

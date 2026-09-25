@@ -17,8 +17,8 @@ is explicit in the types.
 # built-in examples
 cargo run -p catnn-cli -- compile mlp --cluster demo --mem code=4MiB,buffer=64GiB,scratch=128KiB
 cargo run -p catnn-cli -- run mlp --cluster demo
-cargo run -p catnn-cli -- train mlp --steps 12 --opt sgd --lr 0.05
-cargo run -p catnn-cli -- train mixtral-tiny --steps 4 --opt sgd --mem-per-device 256KiB
+cargo run -p catnn-cli -- train mlp --cluster demo --steps 12 --opt sgd --lr 0.05
+cargo run -p catnn-cli -- train mixtral-tiny --cluster cpu --steps 4 --opt sgd --mem code=4MiB,buffer=64MiB,scratch=1MiB
 cargo run -p catnn-cli -- mixtral-train-sweep --seq 2048 --global-batch 8
 cargo run -p catnn-cli -- adapt mlp --cluster demo
 cargo run -p catnn-cli -- inspect transformer --cluster demo
@@ -106,11 +106,14 @@ To attach a real GPU later: construct a wgpu device, load the already-generated
 ## Runtime
 
 - One `DeviceHandler` per device, each accumulating a `LocalSection`.
-- Cross-device tensors go through `ChannelFabric` (std `mpsc`). Node threads
-  are spawned so the cluster is concurrent, not a single-threaded walk.
+- A cross-device tensor is routed along the cluster's directed links
+  (intra-node hops use the implicit device link). Device threads run the
+  ops whose inputs have arrived and read the tensor the route delivered.
+  An intermediate node relays. There is no path when the topology does
+  not connect the two nodes.
 - `transfer::spawn_tcp_node` / `send_tcp` is a length-prefixed localhost
   protocol for a real multi-process stand-in; the default `run` path uses
-  channels.
+  in-process hops along the same routes.
 - After execution, local sections are glued. Incompatible overlaps fail
   descent (see `sheaf` tests).
 
@@ -222,12 +225,15 @@ Queries: `fastest_under(M)` for a structured `M`; `min_region(code\|buffer\|scra
 Adjoints are `Para(Lens)` 1-morphisms. The Mixtral router uses a straight-through estimator: stop-grad on the discrete top-k index, softmax weights remain differentiable. SGD is a lens (`p − lr·g`; PutGet fails). Adam is an optic with residual `(m, v, t)`.
 
 ```bash
-cargo run -p catnn-cli -- train mlp --steps 12 --opt sgd --lr 0.05
-cargo run -p catnn-cli -- train mixtral-tiny --steps 4 --opt sgd --mem-per-device 256KiB
+cargo run -p catnn-cli -- train mlp --cluster demo --steps 12 --opt sgd --lr 0.05
+cargo run -p catnn-cli -- train examples/mlp.catnn --cluster examples/cluster.toml --steps 8 --opt sgd
+cargo run -p catnn-cli -- train mixtral-tiny --cluster cpu --steps 4 --opt sgd --mem-per-device 1MiB
 cargo run -p catnn-cli -- mixtral-train-sweep --seq 2048 --global-batch 8
 ```
 
-The constrained (checkpointed) tiny Mixtral schedule rematerializes with the same sequential GEMM (`linear_seq`) as the stored-activation path, so activations and parameter updates are **bit-identical** on this deterministic CPU. Full-size 8x7B / 8x22B training is the Spark *plan* (joint EP/TP/PP/DP × ZeRO × checkpoint × NVMe offload, 1F1B, simulated code/buffer/scratch peaks), not a materialized step.
+`catnn train` lowers the spec the same way `compile` does, builds the adjoint of that IR, and applies SGD or Adam. Each device is scheduled against its code, buffer, and scratch caps. The step runs only when every device fits (a tight buffer may checkpoint one activation; a tight code region may reload kernels). An overflowing region is named and nothing is executed. Cross-device activations and gradients follow the cluster links, including multi-hop relays.
+
+The lowered Mixtral graph is the sequential chain of embedding, RMSNorm, GQA, MoE, and the LM head. The hand-written residual trainer in `train.rs` is a separate witness for the residual block. Full-size 8x7B / 8x22B weights are not materialized, so `train` refuses them. `mixtral-train-sweep` remains the Spark *plan* (joint EP/TP/PP/DP × ZeRO × checkpoint × NVMe offload, 1F1B, simulated peaks).
 
 ## Mixtral and DGX Spark
 

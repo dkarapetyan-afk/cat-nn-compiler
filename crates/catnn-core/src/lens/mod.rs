@@ -10,15 +10,15 @@
 pub mod lawful;
 pub mod moe;
 pub mod open;
-pub mod optim;
 pub mod optic;
+pub mod optim;
 pub mod para;
 pub mod wiring;
 
 pub use lawful::{first_of_pair, identity_f64, LawfulLens, LensSpec, PairState};
 pub use moe::{ExpertFamily, GateView, MoEBlock, RouterResidual};
 pub use open::{CompositeSystem, OpenComponent};
-pub use optim::{Adam, AdamState, OptimizerKind, Sgd};
 pub use optic::{Observation, Optic, PolicyState, UnlawfulWitness};
+pub use optim::{Adam, AdamState, OptimizerKind, Sgd};
 pub use para::{ChainRuleWitness, Cotangent, ParaBody, ParaGen, ParaMorphism, ReverseRule};
 pub use wiring::{Apex, StructuredCospan, Wire};

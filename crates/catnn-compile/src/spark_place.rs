@@ -389,13 +389,7 @@ fn better_plan<'a>(a: &'a Scored, b: &'a Scored) -> &'a Scored {
     }
 }
 
-fn rationale(
-    chosen: &Scored,
-    feasible: &[&Scored],
-    fits: bool,
-    n: usize,
-    usable: u64,
-) -> String {
+fn rationale(chosen: &Scored, feasible: &[&Scored], fits: bool, n: usize, usable: u64) -> String {
     let dec = &chosen.dec;
     let ms = |s: f64| s * 1e3;
     if !fits {
@@ -415,7 +409,9 @@ fn rationale(
         .iter()
         .copied()
         .filter(|s| s.ep != chosen.ep || s.tp != chosen.tp || s.pp != chosen.pp)
-        .min_by(|a, b| a.dec.step_s.partial_cmp(&b.dec.step_s).unwrap_or(std::cmp::Ordering::Equal));
+        .min_by(|a, b| {
+            a.dec.step_s.partial_cmp(&b.dec.step_s).unwrap_or(std::cmp::Ordering::Equal)
+        });
 
     let mut why = format!(
         "min decode {:.2} ms among {} feasible EP*TP*PP={n} plans \
@@ -555,11 +551,8 @@ fn decode_cost(
     let remote = if ep > 1 { (ep - 1) as f64 / ep as f64 } else { 0.0 };
     let a2a_bytes = prec.packed_bytes(a2a_elems_layer * layers);
     let a2a_remote = (a2a_bytes as f64 * remote) as u64;
-    let a2a_s = if ep > 1 {
-        layers as f64 * hop + a2a_remote as f64 * batch as f64 / link
-    } else {
-        0.0
-    };
+    let a2a_s =
+        if ep > 1 { layers as f64 * hop + a2a_remote as f64 * batch as f64 / link } else { 0.0 };
 
     // TP ring all-reduce of the residual stream. Megatron-style: one AR after
     // attention (row-parallel out-proj) and one after the MoE/MLP — two per
@@ -770,8 +763,8 @@ mod tests {
         assert_eq!(p.weight_bytes_per_node, Precision::Bf16.packed_bytes(w.total()));
         // With any N=8 factorization, per-node weights must be well below
         // the unsharded 8x7B bf16 footprint (~88 GiB of weights).
-        let unsharded = plan_mixtral(&cfg, 1, Precision::Bf16, SparkTopology::Switch, 4096, 1)
-            .unwrap();
+        let unsharded =
+            plan_mixtral(&cfg, 1, Precision::Bf16, SparkTopology::Switch, 4096, 1).unwrap();
         assert!(
             p.weight_bytes_per_node * 2 < unsharded.weight_bytes_per_node,
             "N=8 weights {:.1} GiB should be far below N=1 {:.1} GiB",
@@ -789,11 +782,7 @@ mod tests {
         assert_eq!(tp.a2a_s, 0.0);
         // Two ARs / layer × 32 layers × 2·(8-1) hops × 2 µs = 1.792 ms of
         // latency alone, before payload.
-        assert!(
-            tp.ar_s > 1.5e-3,
-            "TP=8 two-AR/layer latency floor, got {} s",
-            tp.ar_s
-        );
+        assert!(tp.ar_s > 1.5e-3, "TP=8 two-AR/layer latency floor, got {} s", tp.ar_s);
 
         let ep = decode_cost(&cfg, Precision::Bf16, 8, 1, 1, 1, &spec).unwrap();
         assert!(ep.a2a_s > 0.0, "EP=8 must pay all-to-all");

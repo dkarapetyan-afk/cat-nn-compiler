@@ -145,7 +145,12 @@ pub fn linear(x: &Tensor, w: &Tensor, bias: Option<&Tensor>) -> CatResult<Tensor
     linear_inner(x, w, bias, true)
 }
 
-fn linear_inner(x: &Tensor, w: &Tensor, bias: Option<&Tensor>, parallel: bool) -> CatResult<Tensor> {
+fn linear_inner(
+    x: &Tensor,
+    w: &Tensor,
+    bias: Option<&Tensor>,
+    parallel: bool,
+) -> CatResult<Tensor> {
     let xd = &x.ty.shape.dims;
     let wd = &w.ty.shape.dims;
     if xd.len() < 2 || wd.len() != 2 {

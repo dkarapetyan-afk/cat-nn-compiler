@@ -558,12 +558,7 @@ fn topk_fixed(logits: &[f64], idx: &[usize]) -> Vec<f64> {
     w
 }
 
-fn moe_frozen(
-    x: &Arr,
-    gate: &Arr,
-    experts: &[(Arr, Arr, Arr)],
-    idx: &[Vec<usize>],
-) -> Arr {
+fn moe_frozen(x: &Arr, gate: &Arr, experts: &[(Arr, Arr, Arr)], idx: &[Vec<usize>]) -> Arr {
     let hidden = x.last();
     let tokens = x.data.len() / hidden;
     let n_exp = gate.dims[1];
@@ -623,7 +618,8 @@ fn moe_bwd_frozen(
         let row = &logits.data[t * n_exp..(t + 1) * n_exp];
         let wts = topk_fixed(row, &idx[t]);
         let xt = Arr { dims: vec![1, hidden], data: x.data[t * hidden..(t + 1) * hidden].to_vec() };
-        let dyt = Arr { dims: vec![1, hidden], data: dy.data[t * hidden..(t + 1) * hidden].to_vec() };
+        let dyt =
+            Arr { dims: vec![1, hidden], data: dy.data[t * hidden..(t + 1) * hidden].to_vec() };
         let mut dsel = vec![0.0; idx[t].len()];
         for (k, &e) in idx[t].iter().enumerate() {
             let y = swiglu(&xt, &experts[e].0, &experts[e].1, &experts[e].2);
@@ -874,7 +870,20 @@ fn tiny_mixtral_e2e() -> CatResult<Vec<FdRow>> {
         let (rel, abs, n) = fd_max(
             &table,
             &analytic,
-            |tp| mixtral_scalar(&cfg, &w, &tokens, batch, seq, Some(tp), None, None, &routes, Scalar::Ce),
+            |tp| {
+                mixtral_scalar(
+                    &cfg,
+                    &w,
+                    &tokens,
+                    batch,
+                    seq,
+                    Some(tp),
+                    None,
+                    None,
+                    &routes,
+                    Scalar::Ce,
+                )
+            },
             1e-6,
             12,
         )?;
@@ -888,7 +897,18 @@ fn tiny_mixtral_e2e() -> CatResult<Vec<FdRow>> {
             &table,
             &analytic,
             |tp| {
-                mixtral_scalar(&cfg, &w, &tokens, batch, seq, Some(tp), None, None, &routes, Scalar::HiddenSum)
+                mixtral_scalar(
+                    &cfg,
+                    &w,
+                    &tokens,
+                    batch,
+                    seq,
+                    Some(tp),
+                    None,
+                    None,
+                    &routes,
+                    Scalar::HiddenSum,
+                )
             },
             1e-6,
             12,
@@ -902,7 +922,18 @@ fn tiny_mixtral_e2e() -> CatResult<Vec<FdRow>> {
             &wq,
             &analytic,
             |wp| {
-                mixtral_scalar(&cfg, &w, &tokens, batch, seq, None, Some(wp), None, &routes, Scalar::HiddenSum)
+                mixtral_scalar(
+                    &cfg,
+                    &w,
+                    &tokens,
+                    batch,
+                    seq,
+                    None,
+                    Some(wp),
+                    None,
+                    &routes,
+                    Scalar::HiddenSum,
+                )
             },
             1e-6,
             12,
@@ -910,10 +941,8 @@ fn tiny_mixtral_e2e() -> CatResult<Vec<FdRow>> {
         rows.push(row("mixtral_tiny.L0.wq", rel, abs, n));
     }
     {
-        let e_id = routes
-            .first()
-            .and_then(|layer| layer.iter().flatten().copied().next())
-            .unwrap_or(0);
+        let e_id =
+            routes.first().and_then(|layer| layer.iter().flatten().copied().next()).unwrap_or(0);
         let e = t64(&w.layers[0].experts[e_id].0);
         let analytic = mixtral_grad(&cfg, &w, &tokens, batch, seq, Scalar::HiddenSum)?;
         let dw1 = analytic.ew1.get(e_id).cloned().unwrap_or_else(|| Arr::zeros(e.dims.clone()));
@@ -1011,11 +1040,8 @@ fn mixtral_scalar(
     x.dims = vec![batch, seq, h];
     for (li, layer) in w.layers.iter().enumerate() {
         let xn = rmsnorm(&x, &t64(&layer.rms_attn), cfg.rms_norm_eps as f64);
-        let wq = if li == 0 {
-            wq0.cloned().unwrap_or_else(|| t64(&layer.wq))
-        } else {
-            t64(&layer.wq)
-        };
+        let wq =
+            if li == 0 { wq0.cloned().unwrap_or_else(|| t64(&layer.wq)) } else { t64(&layer.wq) };
         let attn = gqa(
             &xn,
             &wq,
@@ -1032,11 +1058,8 @@ fn mixtral_scalar(
             *o += *v;
         }
         let xm = rmsnorm(&x, &t64(&layer.rms_moe), cfg.rms_norm_eps as f64);
-        let mut experts: Vec<(Arr, Arr, Arr)> = layer
-            .experts
-            .iter()
-            .map(|(a, b, c)| (t64(a), t64(b), t64(c)))
-            .collect();
+        let mut experts: Vec<(Arr, Arr, Arr)> =
+            layer.experts.iter().map(|(a, b, c)| (t64(a), t64(b), t64(c))).collect();
         if li == 0 {
             if let Some((eid, e)) = ew1 {
                 experts[eid].0 = e.clone();
@@ -1145,7 +1168,8 @@ fn mixtral_grad(
     };
     let mut wq0 = Arr::zeros(vec![h, h]);
     let n_exp = w.layers[0].experts.len();
-    let mut ew1: Vec<Arr> = (0..n_exp).map(|_| Arr::zeros(vec![h, cfg.intermediate_size])).collect();
+    let mut ew1: Vec<Arr> =
+        (0..n_exp).map(|_| Arr::zeros(vec![h, cfg.intermediate_size])).collect();
     for li in (0..w.layers.len()).rev() {
         let layer: &LayerWeights = &w.layers[li];
         let (_xn, ref xmid, ref xm, ref _attn, ref idx) = &tape[li];
@@ -1187,7 +1211,6 @@ fn mixtral_grad(
     Ok(MixtralG64 { embed: dembed, wq0, ew1 })
 }
 
-
 pub fn format_fd_table(rows: &[FdRow]) -> String {
     let mut s = String::from("op                        max_rel      max_abs   probes\n");
     s.push_str(&"-".repeat(60));
@@ -1222,13 +1245,7 @@ mod tests {
             } else {
                 r.max_rel < 2e-6
             };
-            assert!(
-                ok,
-                "{} max_rel {:.3e} (abs {:.3e})\n{table}",
-                r.name,
-                r.max_rel,
-                r.max_abs
-            );
+            assert!(ok, "{} max_rel {:.3e} (abs {:.3e})\n{table}", r.name, r.max_rel, r.max_abs);
         }
     }
 }

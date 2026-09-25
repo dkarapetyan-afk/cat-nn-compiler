@@ -3,6 +3,7 @@
 pub mod ir;
 pub mod kernel;
 pub mod lower;
+pub mod pipeline;
 pub mod place;
 pub mod schedule;
 pub mod spark_place;

@@ -59,18 +59,22 @@ pub fn specialized_ops() -> Vec<(String, OpenOp)> {
             for dir in ["fwd", "bwd"] {
                 v.push((
                     format!("gemm_{name}_{prec}_{dir}"),
-                    OpenOp::Linear { in_features: tile as usize, out_features: tile as usize, bias: false },
+                    OpenOp::Linear {
+                        in_features: tile as usize,
+                        out_features: tile as usize,
+                        bias: false,
+                    },
                 ));
             }
         }
     }
     // Shape specializations for 8x7B / 8x22B GEMM K-dimensions.
     for (h, mid, tag) in [(4096usize, 14336usize, "8x7b"), (6144, 16384, "8x22b")] {
-        v.push((format!("gemm_qkv_{tag}"), OpenOp::Linear { in_features: h, out_features: h, bias: false }));
         v.push((
-            format!("gemm_swiglu_{tag}"),
-            OpenOp::SwiGlu { hidden: h, intermediate: mid },
+            format!("gemm_qkv_{tag}"),
+            OpenOp::Linear { in_features: h, out_features: h, bias: false },
         ));
+        v.push((format!("gemm_swiglu_{tag}"), OpenOp::SwiGlu { hidden: h, intermediate: mid }));
     }
     v.push(("rmsnorm_fwd".into(), OpenOp::RmsNorm { eps_e6: 10 }));
     v.push(("rmsnorm_bwd".into(), OpenOp::RmsNorm { eps_e6: 10 }));
@@ -326,7 +330,12 @@ pub fn format_inventory(inv: &CodeInventory) -> String {
 
 /// Mean measured cubin (or a defensible fallback if compile failed).
 pub fn typical_cubin_bytes(inv: &CodeInventory) -> u64 {
-    let ok: Vec<u64> = inv.cuda.iter().filter(|c| c.compiled && c.cubin_bytes > 0).map(|c| c.cubin_bytes).collect();
+    let ok: Vec<u64> = inv
+        .cuda
+        .iter()
+        .filter(|c| c.compiled && c.cubin_bytes > 0)
+        .map(|c| c.cubin_bytes)
+        .collect();
     if ok.is_empty() {
         // Naive GEMM cubin on sm_80 was measured at 5544 B in this VM.
         5544

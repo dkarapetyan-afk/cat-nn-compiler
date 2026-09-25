@@ -31,10 +31,7 @@ impl Sgd {
     /// `put(p, g) = p − lr · g`.
     pub fn put(&self, p: &Tensor, g: &Tensor) -> CatResult<Tensor> {
         if p.data.len() != g.data.len() {
-            return Err(CatError::ShapeMismatch(format!(
-                "sgd put {} vs {}",
-                p.ty, g.ty
-            )));
+            return Err(CatError::ShapeMismatch(format!("sgd put {} vs {}", p.ty, g.ty)));
         }
         let mut out = p.clone();
         let lr = self.lr;
@@ -122,16 +119,10 @@ impl Adam {
 
     /// Adam as an optic `P ─(m,v,t)→ dP`. The view is unused (grad arrives
     /// as the `V` argument of [`Optic::step`]).
-    pub fn as_optic(
-        &self,
-    ) -> Optic<Tensor, Tensor, AdamState> {
+    pub fn as_optic(&self) -> Optic<Tensor, Tensor, AdamState> {
         // Function pointers cannot capture `self`; callers use [`Adam::put`].
         // The optic object records the *type* of the update for the fibration.
-        Optic::new(
-            "adam",
-            |p, _s| p.clone(),
-            |p, _g, s| (p.clone(), s.clone()),
-        )
+        Optic::new("adam", |p, _s| p.clone(), |p, _g, s| (p.clone(), s.clone()))
     }
 
     pub fn unlawful() -> UnlawfulWitness {

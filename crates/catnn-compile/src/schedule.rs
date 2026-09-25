@@ -237,9 +237,12 @@ pub fn schedule(req: ScheduleRequest<'_>) -> ScheduledStep {
     let mut sorted_bufs = buffers.clone();
     sorted_bufs.sort_by_key(|b| b.live_from);
 
-    let max_t = launches.iter().map(|l| l.at).max().unwrap_or(0).max(
-        buffers.iter().map(|b| b.live_to).max().unwrap_or(0),
-    );
+    let max_t = launches
+        .iter()
+        .map(|l| l.at)
+        .max()
+        .unwrap_or(0)
+        .max(buffers.iter().map(|b| b.live_to).max().unwrap_or(0));
 
     for tick in 0..=max_t {
         while next_buf < sorted_bufs.len() && sorted_bufs[next_buf].live_from == tick {
@@ -265,7 +268,9 @@ pub fn schedule(req: ScheduleRequest<'_>) -> ScheduledStep {
             let k = &launch.kernel;
             let need = k.code_footprint();
             if !resident.iter().any(|(n, _)| n == &k.name) {
-                while code_live + need > req.regions.code.bytes && !resident.is_empty() && req.allow_reload
+                while code_live + need > req.regions.code.bytes
+                    && !resident.is_empty()
+                    && req.allow_reload
                 {
                     let (evict, sz) = resident.remove(0);
                     code_live = code_live.saturating_sub(sz);
@@ -274,7 +279,8 @@ pub fn schedule(req: ScheduleRequest<'_>) -> ScheduledStep {
                     // Alternative 2-cell: fuse the evicted module with the
                     // incoming one to cut the code-region footprint.
                     cells.push(TwoCell::fuse_code(vec![evict.clone(), k.name.clone()]));
-                    let p = RegionPeaks { code: code_live, buffer: buffer_live, scratch: scratch_live };
+                    let p =
+                        RegionPeaks { code: code_live, buffer: buffer_live, scratch: scratch_live };
                     events.push(Event {
                         t,
                         kind: EventKind::EvictKernel { name: evict },
@@ -461,9 +467,9 @@ pub fn min_region(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::kernel::resource::describe;
     use catnn_core::architecture::KernelBackend;
     use catnn_core::category::OpenOp;
-    use crate::kernel::resource::describe;
 
     fn dummy_k(name: &str) -> KernelResource {
         describe(&OpenOp::Relu, name, KernelBackend::CpuRust)
@@ -541,14 +547,14 @@ mod tests {
         assert!(s.feasible, "{}", s.rationale);
         assert!(s.kernel_reloads >= 1, "reloads={}", s.kernel_reloads);
         assert!(s.peaks.code <= regions.code.bytes);
-        assert!(s.cells.iter().any(|c| matches!(
-            c.rewrite,
-            catnn_core::category::Rewrite::KernelResidency { .. }
-        )));
-        assert!(s.cells.iter().any(|c| matches!(
-            c.rewrite,
-            catnn_core::category::Rewrite::FuseCode { .. }
-        )));
+        assert!(s
+            .cells
+            .iter()
+            .any(|c| matches!(c.rewrite, catnn_core::category::Rewrite::KernelResidency { .. })));
+        assert!(s
+            .cells
+            .iter()
+            .any(|c| matches!(c.rewrite, catnn_core::category::Rewrite::FuseCode { .. })));
     }
 
     #[test]

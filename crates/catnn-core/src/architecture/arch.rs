@@ -79,11 +79,7 @@ pub enum ArchRefinementKind {
     /// to kernel reload / fuse-code 2-cells; a smaller **buffer** object
     /// reindexes to rematerialize / offload; a smaller **scratch** object
     /// reindexes to occupancy-reducing fusion.
-    TightenMemory {
-        region: MemoryRegionKind,
-        from_bytes: u64,
-        to_bytes: u64,
-    },
+    TightenMemory { region: MemoryRegionKind, from_bytes: u64, to_bytes: u64 },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -126,13 +122,7 @@ impl ArchMorphism {
         to_bytes: u64,
     ) -> Self {
         Self {
-            name: format!(
-                "tighten:{}:{}:{}→{}",
-                arch.id,
-                region.as_str(),
-                from_bytes,
-                to_bytes
-            ),
+            name: format!("tighten:{}:{}:{}→{}", arch.id, region.as_str(), from_bytes, to_bytes),
             src: arch.id.clone(),
             tgt: arch.id.clone(),
             kind: ArchRefinementKind::TightenMemory { region, from_bytes, to_bytes },

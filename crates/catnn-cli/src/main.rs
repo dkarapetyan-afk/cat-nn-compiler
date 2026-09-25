@@ -17,6 +17,7 @@ use catnn_core::spec::{
 use catnn_core::tensor::Tensor;
 use catnn_core::Architecture;
 use catnn_rt::execute;
+use catnn_rt::train_on_cluster;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser, Debug)]
@@ -78,9 +79,12 @@ enum Cmd {
         #[arg(long)]
         mem_per_device: Option<String>,
     },
-    /// CPU training loop (MLP or mixtral-tiny) under a memory budget.
+    /// Stage forward, adjoint, and SGD/Adam updates on a cluster.
     Train {
         spec: String,
+        /// Cluster name (`cpu`, `demo`, `sparkN`) or a TOML/JSON cluster file.
+        #[arg(long, default_value = "cpu")]
+        cluster: String,
         #[arg(long, default_value_t = 8)]
         steps: usize,
         #[arg(long, default_value = "sgd")]
@@ -143,9 +147,16 @@ fn main() -> Result<()> {
         Cmd::Inspect { spec, cluster, mem, mem_per_device } => {
             cmd_inspect(&spec, &cluster, mem.as_deref(), mem_per_device.as_deref())
         }
-        Cmd::Train { spec, steps, opt, lr, seed, mem, mem_per_device } => {
-            cmd_train(&spec, steps, &opt, lr, seed, mem.as_deref(), mem_per_device.as_deref())
-        }
+        Cmd::Train { spec, cluster, steps, opt, lr, seed, mem, mem_per_device } => cmd_train(
+            &spec,
+            &cluster,
+            steps,
+            &opt,
+            lr,
+            seed,
+            mem.as_deref(),
+            mem_per_device.as_deref(),
+        ),
         Cmd::MixtralSweep { model, context, batch, weights } => {
             cmd_mixtral_sweep(&model, context, batch, weights.as_deref())
         }
@@ -163,7 +174,10 @@ fn main() -> Result<()> {
     }
 }
 
-fn parse_mem_flags(mem: Option<&str>, mem_per_device: Option<&str>) -> Result<Option<MemoryBudget>> {
+fn parse_mem_flags(
+    mem: Option<&str>,
+    mem_per_device: Option<&str>,
+) -> Result<Option<MemoryBudget>> {
     if let Some(s) = mem.or(mem_per_device) {
         Ok(Some(MemoryBudget::parse(s)?))
     } else {
@@ -252,10 +266,7 @@ fn cmd_compile(
     let mut cluster = load_cluster(cluster)?;
     if let Some(b) = parse_mem_flags(mem, mem_per_device)? {
         cluster = cluster.with_budget(b);
-        println!(
-            "memory budget: code={:?} buffer={} scratch={:?}",
-            b.code, b.buffer, b.scratch
-        );
+        println!("memory budget: code={:?} buffer={} scratch={:?}", b.code, b.buffer, b.scratch);
     }
     let compiled = compile(&arch, &cluster)?;
     println!("architecture: {}", arch.id);
@@ -448,8 +459,10 @@ fn cmd_inspect(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn cmd_train(
     spec: &str,
+    cluster_name: &str,
     steps: usize,
     opt: &str,
     lr: f64,
@@ -464,33 +477,46 @@ fn cmd_train(
         budget: parse_mem_flags(mem, mem_per_device)?,
         seed,
     };
-    let report = if spec == "mixtral-tiny" || spec.contains("mixtral") {
-        if spec.contains("8x7") || spec.contains("8x22") {
-            bail!("full-size Mixtral training is planned, not executed. Use mixtral-tiny or mixtral-train-sweep.");
-        }
-        train::train_mixtral_tiny(&opts)?
+    let arch = load_arch(spec)?;
+    let mut cluster = load_cluster(cluster_name)?;
+    if let Some(b) = opts.budget {
+        cluster = cluster.with_budget(b);
+    }
+    let report = train_on_cluster(&arch, &cluster, &opts)?;
+    println!("train {spec} cluster={cluster_name} opt={opt} steps={steps} lr={lr}");
+    println!("placement:");
+    for (op, dev) in &report.placement {
+        println!("  {op:>16} → {dev}");
+    }
+    if report.routes.is_empty() {
+        println!("routes: all values stay on their producing device");
     } else {
-        train::train_mlp(&opts)?
-    };
-    println!("train {spec} opt={opt} steps={steps} lr={lr}");
-    println!("losses: {:?}", report.losses);
-    println!("final params checksum: {:016x}", report.final_params_checksum);
-    println!(
-        "schedule: feasible={} peaks code={} buffer={} scratch={} ({})",
-        report.schedule.feasible,
-        report.schedule.peaks.code,
-        report.schedule.peaks.buffer,
-        report.schedule.peaks.scratch,
-        report.schedule.rationale
-    );
-    if !report.schedule.feasible {
+        println!("routes:");
+        for route in &report.routes {
+            println!("  {} : {}", route.tag, route.hops.join(" → "));
+        }
+    }
+    for device in &report.devices {
         println!(
-            "INFEASIBLE region: {:?}",
-            report.schedule.overflow_region
+            "schedule {}: feasible={} peaks code={} buffer={} scratch={} ({})",
+            device.device,
+            device.schedule.feasible,
+            device.schedule.peaks.code,
+            device.schedule.peaks.buffer,
+            device.schedule.peaks.scratch,
+            device.schedule.rationale
         );
     }
-    println!("executed: CPU training step (forward, loss, adjoint, optimizer).");
-    println!("not executed: GPU kernels, full-size Mixtral, HF weights.");
+    if !report.feasible {
+        bail!("{}", report.rationale);
+    }
+    println!("losses: {:?}", report.losses);
+    println!("final params checksum: {:016x}", report.final_params_checksum);
+    println!("messages: {} bytes_moved: {}", report.messages, report.bytes_moved);
+    println!(
+        "executed: forward, adjoint, and {opt} updates. Cross-device tensors followed cluster links."
+    );
+    println!("not executed: GPU dispatch, full-size Mixtral weights, HF reference.");
     Ok(())
 }
 

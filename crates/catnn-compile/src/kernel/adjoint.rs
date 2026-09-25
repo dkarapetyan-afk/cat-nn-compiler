@@ -5,9 +5,13 @@
 //! / stop-gradient** on the discrete top-k index: gradients flow through
 //! the softmax weights of the *selected* experts only.
 
+use indexmap::IndexMap;
+
+use catnn_core::category::OpenOp;
 use catnn_core::tensor::{Tensor, TensorType};
 use catnn_core::{CatError, CatResult};
 
+use crate::ir::IrNode;
 use crate::kernel::cpu;
 use crate::kernel::moe;
 
@@ -88,10 +92,8 @@ pub fn gelu_backward(x: &Tensor, dy: &Tensor) -> CatResult<Tensor> {
 pub fn softmax_backward(y: &Tensor, dy: &Tensor) -> CatResult<Tensor> {
     let last = last_dim(y)?;
     let mut dx = dy.clone();
-    for (row_y, (row_dy, row_dx)) in y
-        .data
-        .chunks(last)
-        .zip(dy.data.chunks(last).zip(dx.data.chunks_mut(last)))
+    for (row_y, (row_dy, row_dx)) in
+        y.data.chunks(last).zip(dy.data.chunks(last).zip(dx.data.chunks_mut(last)))
     {
         let dot: f32 = row_y.iter().zip(row_dy.iter()).map(|(s, g)| s * g).sum();
         for i in 0..last {
@@ -177,15 +179,20 @@ pub fn rmsnorm_backward(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn yrow_dx(yrow: &[f32], row: &[f32], w: &Tensor, inv: f32, dms: f32, n: f32, i: usize, out: &mut f32) {
+fn yrow_dx(
+    yrow: &[f32],
+    row: &[f32],
+    w: &Tensor,
+    inv: f32,
+    dms: f32,
+    n: f32,
+    i: usize,
+    out: &mut f32,
+) {
     *out = yrow[i] * inv * w.data[i] + dms * (2.0 * row[i] / n);
 }
 
-pub fn embedding_backward(
-    ids: &[u32],
-    table: &Tensor,
-    dy: &Tensor,
-) -> CatResult<Tensor> {
+pub fn embedding_backward(ids: &[u32], table: &Tensor, dy: &Tensor) -> CatResult<Tensor> {
     let hidden = table.ty.shape.dims[1];
     let mut dw = Tensor::zeros(table.ty.clone());
     for (t, &id) in ids.iter().enumerate() {
@@ -467,7 +474,8 @@ pub fn moe_backward(
     experts: &[(Tensor, Tensor, Tensor)],
     top_k: usize,
     dy: &Tensor,
-) -> CatResult<(Tensor, Tensor, Vec<(Tensor, Tensor, Tensor)>)> { // expert (w1,w3,w2) grads
+) -> CatResult<(Tensor, Tensor, Vec<(Tensor, Tensor, Tensor)>)> {
+    // expert (w1,w3,w2) grads
     let hidden = *x.ty.shape.dims.last().unwrap();
     let tokens = x.data.len() / hidden;
     let (idx, wts, _) = moe::route(x, gate, top_k)?;
@@ -517,6 +525,415 @@ pub fn moe_backward(
     Ok((dx, dgate, dex))
 }
 
+/// LayerNorm adjoint matching [`cpu::layer_norm`]: population variance over
+/// the last axis, `y = (x - mean) * inv * gamma + beta`.
+pub fn layer_norm_backward(
+    x: &Tensor,
+    gamma: &Tensor,
+    _beta: &Tensor,
+    dy: &Tensor,
+    eps: f32,
+) -> CatResult<(Tensor, Tensor, Tensor)> {
+    let last = last_dim(x)?;
+    if gamma.data.len() != last || dy.data.len() != x.data.len() {
+        return Err(CatError::ShapeMismatch("layernorm grad".into()));
+    }
+    let mut dx = Tensor::zeros(x.ty.clone());
+    let mut dgamma = vec![0.0f32; last];
+    let mut dbeta = vec![0.0f32; last];
+    let n = last as f32;
+    for (row, (drow, yrow)) in
+        x.data.chunks(last).zip(dx.data.chunks_mut(last).zip(dy.data.chunks(last)))
+    {
+        let mean = row.iter().sum::<f32>() / n;
+        let var = row
+            .iter()
+            .map(|v| {
+                let d = v - mean;
+                d * d
+            })
+            .sum::<f32>()
+            / n;
+        let inv = 1.0 / (var + eps).sqrt();
+        let mut xhat = vec![0.0f32; last];
+        let mut dxhat = vec![0.0f32; last];
+        for i in 0..last {
+            xhat[i] = (row[i] - mean) * inv;
+            dbeta[i] += yrow[i];
+            dgamma[i] += yrow[i] * xhat[i];
+            dxhat[i] = yrow[i] * gamma.data[i];
+        }
+        let sum_dxhat = dxhat.iter().sum::<f32>();
+        let sum_dxhat_xhat = dxhat.iter().zip(xhat.iter()).map(|(a, b)| a * b).sum::<f32>();
+        for i in 0..last {
+            drow[i] = (inv / n) * (n * dxhat[i] - sum_dxhat - xhat[i] * sum_dxhat_xhat);
+        }
+    }
+    Ok((
+        dx,
+        Tensor::from_vec(gamma.ty.clone(), dgamma)?,
+        Tensor::from_vec(TensorType::f32([last]), dbeta)?,
+    ))
+}
+
+/// VJP of [`cpu::attention`]. Recomputes Q, K, V, and the attention matrix
+/// with the same projection the forward uses, then applies the chain rule.
+#[allow(clippy::too_many_arguments, clippy::needless_range_loop)]
+pub fn attention_backward(
+    x: &Tensor,
+    wq: &Tensor,
+    wk: &Tensor,
+    wv: &Tensor,
+    wo: &Tensor,
+    n_heads: usize,
+    d_head: usize,
+    dy: &Tensor,
+) -> CatResult<(Tensor, Tensor, Tensor, Tensor, Tensor)> {
+    let dims = &x.ty.shape.dims;
+    if dims.len() != 3 {
+        return Err(CatError::ShapeMismatch("attention backward expects [B,S,D]".into()));
+    }
+    let (b, s, d) = (dims[0], dims[1], dims[2]);
+    if d != n_heads * d_head {
+        return Err(CatError::ShapeMismatch("attention head split".into()));
+    }
+    let q = linear3_attn(x, wq, b, s, d)?;
+    let k = linear3_attn(x, wk, b, s, d)?;
+    let v = linear3_attn(x, wv, b, s, d)?;
+    let scale = 1.0 / (d_head as f32).sqrt();
+    let mut attn = vec![0.0f32; b * n_heads * s * s];
+    let mut ctx = vec![0.0f32; b * s * d];
+    for bi in 0..b {
+        for h in 0..n_heads {
+            let mut scores = vec![0.0f32; s * s];
+            for i in 0..s {
+                for j in 0..s {
+                    let mut dot = 0.0;
+                    for t in 0..d_head {
+                        let qi = q.data[bi * s * d + i * d + h * d_head + t];
+                        let kj = k.data[bi * s * d + j * d + h * d_head + t];
+                        dot += qi * kj;
+                    }
+                    scores[i * s + j] = dot * scale;
+                }
+            }
+            for i in 0..s {
+                let row = &mut scores[i * s..(i + 1) * s];
+                let max = row.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                let mut sum = 0.0;
+                for v in row.iter_mut() {
+                    *v = (*v - max).exp();
+                    sum += *v;
+                }
+                let inv = 1.0 / sum.max(1e-30);
+                for v in row.iter_mut() {
+                    *v *= inv;
+                }
+            }
+            let base = (bi * n_heads + h) * s * s;
+            attn[base..base + s * s].copy_from_slice(&scores);
+            for i in 0..s {
+                for t in 0..d_head {
+                    let mut acc = 0.0;
+                    for j in 0..s {
+                        acc += scores[i * s + j] * v.data[bi * s * d + j * d + h * d_head + t];
+                    }
+                    ctx[bi * s * d + i * d + h * d_head + t] = acc;
+                }
+            }
+        }
+    }
+    let ctx_t = Tensor::from_vec(x.ty.clone(), ctx)?;
+    let ctx_flat = Tensor::from_vec(TensorType::f32([b * s, d]), ctx_t.data.clone())?;
+    let dy_flat = Tensor::from_vec(TensorType::f32([b * s, d]), dy.data.clone())?;
+    let (dctx_flat, dwo, _) = linear_backward(&ctx_flat, wo, &dy_flat)?;
+    let dctx = dctx_flat.data;
+
+    let mut dattn = vec![0.0f32; attn.len()];
+    let mut dv = vec![0.0f32; v.data.len()];
+    for bi in 0..b {
+        for h in 0..n_heads {
+            let base = (bi * n_heads + h) * s * s;
+            for i in 0..s {
+                for j in 0..s {
+                    let mut g = 0.0;
+                    for t in 0..d_head {
+                        let dc = dctx[bi * s * d + i * d + h * d_head + t];
+                        let vv = v.data[bi * s * d + j * d + h * d_head + t];
+                        g += dc * vv;
+                        dv[bi * s * d + j * d + h * d_head + t] += attn[base + i * s + j] * dc;
+                    }
+                    dattn[base + i * s + j] = g;
+                }
+            }
+        }
+    }
+    // Softmax VJP per head row.
+    let mut dscores = vec![0.0f32; attn.len()];
+    for bi in 0..b {
+        for h in 0..n_heads {
+            let base = (bi * n_heads + h) * s * s;
+            for i in 0..s {
+                let a = &attn[base + i * s..base + (i + 1) * s];
+                let g = &dattn[base + i * s..base + (i + 1) * s];
+                let dot: f32 = a.iter().zip(g.iter()).map(|(p, dp)| p * dp).sum();
+                for j in 0..s {
+                    dscores[base + i * s + j] = a[j] * (g[j] - dot);
+                }
+            }
+        }
+    }
+    let mut dq = vec![0.0f32; q.data.len()];
+    let mut dk = vec![0.0f32; k.data.len()];
+    for bi in 0..b {
+        for h in 0..n_heads {
+            let base = (bi * n_heads + h) * s * s;
+            for i in 0..s {
+                for j in 0..s {
+                    let g = dscores[base + i * s + j] * scale;
+                    for t in 0..d_head {
+                        let qi = q.data[bi * s * d + i * d + h * d_head + t];
+                        let kj = k.data[bi * s * d + j * d + h * d_head + t];
+                        dq[bi * s * d + i * d + h * d_head + t] += g * kj;
+                        dk[bi * s * d + j * d + h * d_head + t] += g * qi;
+                    }
+                }
+            }
+        }
+    }
+    let x_flat = Tensor::from_vec(TensorType::f32([b * s, d]), x.data.clone())?;
+    let project = |grad: Vec<f32>, w: &Tensor| -> CatResult<(Tensor, Tensor)> {
+        let g = Tensor::from_vec(TensorType::f32([b * s, d]), grad)?;
+        let (dx, dw, _) = linear_backward(&x_flat, w, &g)?;
+        Ok((dx, dw))
+    };
+    let (dxq, dwq) = project(dq, wq)?;
+    let (dxk, dwk) = project(dk, wk)?;
+    let (dxv, dwv) = project(dv, wv)?;
+    let mut dx = dxq;
+    for (o, v) in dx.data.iter_mut().zip(dxk.data.iter()) {
+        *o += *v;
+    }
+    for (o, v) in dx.data.iter_mut().zip(dxv.data.iter()) {
+        *o += *v;
+    }
+    dx.ty = x.ty.clone();
+    Ok((dx, dwq, dwk, dwv, dwo))
+}
+
+fn linear3_attn(x: &Tensor, w: &Tensor, b: usize, s: usize, d: usize) -> CatResult<Tensor> {
+    let flat = Tensor::from_vec(TensorType::f32([b * s, d]), x.data.clone())?;
+    let y = cpu::linear(&flat, w, None)?;
+    Tensor::from_vec(x.ty.clone(), y.data)
+}
+
+fn transpose_matrix(w: &Tensor, rows: usize, cols: usize) -> CatResult<Tensor> {
+    if w.data.len() != rows * cols {
+        return Err(CatError::ShapeMismatch(format!(
+            "transpose {} vs {rows}x{cols}",
+            w.data.len()
+        )));
+    }
+    let mut data = vec![0.0f32; rows * cols];
+    for i in 0..rows {
+        for j in 0..cols {
+            data[j * rows + i] = w.data[i * cols + j];
+        }
+    }
+    Tensor::from_vec(TensorType::f32([cols, rows]), data)
+}
+
+fn need_param<'a>(node: &'a IrNode, port: &str) -> CatResult<&'a Tensor> {
+    node.params
+        .get(port)
+        .ok_or_else(|| CatError::UnknownPort { interface: node.name.clone(), port: port.into() })
+}
+
+/// Reverse-mode result for one IR node: a cotangent per data input, plus
+/// a cotangent per parameter port.
+#[derive(Debug, Clone)]
+pub struct Adjoint {
+    pub dx: Vec<Tensor>,
+    pub dparams: IndexMap<String, Tensor>,
+}
+
+/// Adjoint of one generator. `inputs` are the forward operands in pred
+/// order; `output` is the value the forward produced (softmax needs it).
+pub fn adjoint_of(
+    node: &IrNode,
+    inputs: &[Tensor],
+    output: &Tensor,
+    dy: &Tensor,
+) -> CatResult<Adjoint> {
+    if inputs.is_empty() {
+        return Err(CatError::Wiring(format!("{} adjoint has no inputs", node.name)));
+    }
+    let x = &inputs[0];
+    let mut dparams = IndexMap::new();
+    let dx = match &node.op {
+        OpenOp::Identity | OpenOp::Reshape { .. } | OpenOp::Transpose { .. } => vec![dy.clone()],
+        OpenOp::Relu => vec![relu_backward(x, dy)?],
+        OpenOp::Gelu => vec![gelu_backward(x, dy)?],
+        OpenOp::Softmax { .. } => vec![softmax_backward(output, dy)?],
+        OpenOp::Add | OpenOp::ResidualAdd => {
+            if inputs.len() == 1 {
+                vec![dy.clone()]
+            } else {
+                vec![dy.clone(), dy.clone()]
+            }
+        }
+        OpenOp::Mul => {
+            if inputs.len() == 1 {
+                vec![dy.clone()]
+            } else {
+                let mut dx0 = dy.clone();
+                let mut dx1 = dy.clone();
+                for (o, v) in dx0.data.iter_mut().zip(inputs[1].data.iter()) {
+                    *o *= *v;
+                }
+                for (o, v) in dx1.data.iter_mut().zip(x.data.iter()) {
+                    *o *= *v;
+                }
+                vec![dx0, dx1]
+            }
+        }
+        OpenOp::Linear { .. } | OpenOp::MatMul => {
+            let w = need_param(node, "w")?;
+            let (dx, dw, db) = linear_backward(x, w, dy)?;
+            dparams.insert("w".into(), dw);
+            if node.params.contains_key("b") {
+                if let Some(db) = db {
+                    dparams.insert("b".into(), db);
+                }
+            }
+            vec![dx]
+        }
+        OpenOp::LayerNorm { eps_e6 } => {
+            let gamma = need_param(node, "gamma")?;
+            let beta = need_param(node, "beta")?;
+            let eps = *eps_e6 as f32 * 1e-6;
+            let (dx, dg, db) = layer_norm_backward(x, gamma, beta, dy, eps)?;
+            dparams.insert("gamma".into(), dg);
+            dparams.insert("beta".into(), db);
+            vec![dx]
+        }
+        OpenOp::Attention { n_heads, d_head, .. } => {
+            let (dx, dwq, dwk, dwv, dwo) = attention_backward(
+                x,
+                need_param(node, "wq")?,
+                need_param(node, "wk")?,
+                need_param(node, "wv")?,
+                need_param(node, "wo")?,
+                *n_heads,
+                *d_head,
+                dy,
+            )?;
+            dparams.insert("wq".into(), dwq);
+            dparams.insert("wk".into(), dwk);
+            dparams.insert("wv".into(), dwv);
+            dparams.insert("wo".into(), dwo);
+            vec![dx]
+        }
+        OpenOp::RmsNorm { eps_e6 } => {
+            let w = need_param(node, "w")?;
+            let (dx, dw) = rmsnorm_backward(x, w, dy, *eps_e6 as f32 * 1e-6)?;
+            dparams.insert("w".into(), dw);
+            vec![dx]
+        }
+        OpenOp::Embedding { .. } => {
+            let table = need_param(node, "w")?;
+            let ids: Vec<u32> = x.data.iter().map(|v| v.round().max(0.0) as u32).collect();
+            dparams.insert("w".into(), embedding_backward(&ids, table, dy)?);
+            vec![Tensor::zeros(x.ty.clone())]
+        }
+        OpenOp::SwiGlu { .. } => {
+            let (dx, dw1, dw3, dw2) = swiglu_backward(
+                x,
+                need_param(node, "w1")?,
+                need_param(node, "w3")?,
+                need_param(node, "w2")?,
+                dy,
+            )?;
+            dparams.insert("w1".into(), dw1);
+            dparams.insert("w3".into(), dw3);
+            dparams.insert("w2".into(), dw2);
+            vec![dx]
+        }
+        OpenOp::GqaAttention {
+            n_heads, n_kv_heads, head_dim, rope_theta, sliding_window, ..
+        } => {
+            let (dx, dwq, dwk, dwv, dwo) = gqa_backward(
+                x,
+                need_param(node, "wq")?,
+                need_param(node, "wk")?,
+                need_param(node, "wv")?,
+                need_param(node, "wo")?,
+                *n_heads,
+                *n_kv_heads,
+                *head_dim,
+                *rope_theta as f64,
+                *sliding_window,
+                dy,
+            )?;
+            dparams.insert("wq".into(), dwq);
+            dparams.insert("wk".into(), dwk);
+            dparams.insert("wv".into(), dwv);
+            dparams.insert("wo".into(), dwo);
+            vec![dx]
+        }
+        OpenOp::MoE { n_experts, top_k, .. } => {
+            let gate = need_param(node, "gate")?;
+            let mut experts = Vec::with_capacity(*n_experts);
+            for e in 0..*n_experts {
+                experts.push((
+                    need_param(node, &format!("e{e}.w1"))?.clone(),
+                    need_param(node, &format!("e{e}.w3"))?.clone(),
+                    need_param(node, &format!("e{e}.w2"))?.clone(),
+                ));
+            }
+            let (dx, dgate, dex) = moe_backward(x, gate, &experts, *top_k, dy)?;
+            dparams.insert("gate".into(), dgate);
+            for (e, (dw1, dw3, dw2)) in dex.into_iter().enumerate() {
+                dparams.insert(format!("e{e}.w1"), dw1);
+                dparams.insert(format!("e{e}.w3"), dw3);
+                dparams.insert(format!("e{e}.w2"), dw2);
+            }
+            vec![dx]
+        }
+        OpenOp::LmHead { vocab, hidden } => {
+            let w = need_param(node, "w")?;
+            let wt = transpose_matrix(w, *vocab, *hidden)?;
+            let rows = x.data.len() / (*hidden).max(1);
+            let x_flat = Tensor::from_vec(TensorType::f32([rows, *hidden]), x.data.clone())?;
+            let dy_flat = Tensor::from_vec(TensorType::f32([rows, *vocab]), dy.data.clone())?;
+            let (dx_flat, dwt, _) = linear_backward(&x_flat, &wt, &dy_flat)?;
+            let dlm = transpose_matrix(&dwt, *hidden, *vocab)?;
+            dparams.insert("w".into(), dlm);
+            vec![Tensor::from_vec(x.ty.clone(), dx_flat.data)?]
+        }
+        OpenOp::Router { .. } => {
+            return Err(CatError::Unlawful(
+                "router adjoint is the straight-through estimator inside MoE, not a standalone op"
+                    .into(),
+            ));
+        }
+    };
+    if dx.len() != inputs.len() {
+        return Err(CatError::Wiring(format!(
+            "{} adjoint produced {} cotangents for {} inputs",
+            node.name,
+            dx.len(),
+            inputs.len()
+        )));
+    }
+    Ok(Adjoint { dx, dparams })
+}
+
+/// Ops whose saved *output* (not the input) is the tape the adjoint reads.
+pub fn adjoint_needs_output(op: &OpenOp) -> bool {
+    matches!(op, OpenOp::Softmax { .. })
+}
+
 /// Finite-difference check of a scalar loss `f` against an analytic grad.
 pub fn finite_diff_report(
     p: &Tensor,
@@ -550,10 +967,16 @@ mod tests {
         let y = cpu::linear(&x, &w, None).unwrap();
         let dy = Tensor::ones(y.ty.clone());
         let (_dx, dw, _) = linear_backward(&x, &w, &dy).unwrap();
-        let rel = finite_diff_report(&w, &dw, |wp| {
-            let yp = cpu::linear(&x, wp, None)?;
-            Ok(yp.data.iter().sum())
-        }, 1e-3, 4)
+        let rel = finite_diff_report(
+            &w,
+            &dw,
+            |wp| {
+                let yp = cpu::linear(&x, wp, None)?;
+                Ok(yp.data.iter().sum())
+            },
+            1e-3,
+            4,
+        )
         .unwrap();
         assert!(rel < 0.05, "rel {rel}");
     }
@@ -595,5 +1018,51 @@ mod tests {
         let dx = softmax_backward(&y, &dy).unwrap();
         let s: f32 = dx.data.iter().sum();
         assert!(s.abs() < 1e-5, "{s}");
+    }
+
+    #[test]
+    fn layernorm_matches_finite_diff() {
+        let x = Tensor::lcg(TensorType::f32([2, 4]), 4);
+        let gamma = Tensor::lcg(TensorType::f32([4]), 5);
+        let beta = Tensor::lcg(TensorType::f32([4]), 6);
+        let y = cpu::layer_norm(&x, &gamma, &beta, 1e-5).unwrap();
+        let dy = Tensor::ones(y.ty.clone());
+        let (_dx, dg, _db) = layer_norm_backward(&x, &gamma, &beta, &dy, 1e-5).unwrap();
+        let rel = finite_diff_report(
+            &gamma,
+            &dg,
+            |gp| {
+                let yp = cpu::layer_norm(&x, gp, &beta, 1e-5)?;
+                Ok(yp.data.iter().sum())
+            },
+            1e-3,
+            4,
+        )
+        .unwrap();
+        assert!(rel < 0.08, "rel {rel}");
+    }
+
+    #[test]
+    fn attention_matches_finite_diff() {
+        let x = Tensor::lcg(TensorType::f32([1, 2, 4]), 8);
+        let wq = Tensor::lcg(TensorType::f32([4, 4]), 9);
+        let wk = Tensor::lcg(TensorType::f32([4, 4]), 10);
+        let wv = Tensor::lcg(TensorType::f32([4, 4]), 11);
+        let wo = Tensor::lcg(TensorType::f32([4, 4]), 12);
+        let y = cpu::attention(&x, &wq, &wk, &wv, &wo, 2, 2).unwrap();
+        let dy = Tensor::ones(y.ty.clone());
+        let (_dx, dwq, _, _, _) = attention_backward(&x, &wq, &wk, &wv, &wo, 2, 2, &dy).unwrap();
+        let rel = finite_diff_report(
+            &wq,
+            &dwq,
+            |wp| {
+                let yp = cpu::attention(&x, wp, &wk, &wv, &wo, 2, 2)?;
+                Ok(yp.data.iter().sum())
+            },
+            1e-3,
+            4,
+        )
+        .unwrap();
+        assert!(rel < 0.15, "rel {rel}");
     }
 }

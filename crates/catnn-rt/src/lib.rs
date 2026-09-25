@@ -1,12 +1,14 @@
 //! Runtime: device handlers, cluster scheduler, temporal sheaf, adaptive optic.
 
 pub mod adapt;
+pub mod coord;
 pub mod handler;
 pub mod scheduler;
 pub mod sheaf;
 pub mod transfer;
 
 pub use adapt::{adapt_once, adapt_optic, AdaptStep};
+pub use coord::{train_on_cluster, train_placed, ClusterTrainReport};
 pub use scheduler::{run_compiled, run_with_reference, RunResult};
 pub use sheaf::{compatible, glue, Event, EventKind, GlobalHistory, Interval, LocalSection};
 

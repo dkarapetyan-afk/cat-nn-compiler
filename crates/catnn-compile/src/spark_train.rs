@@ -138,9 +138,9 @@ fn state_bytes_per_node(
     // interpolate.
     let per = match zero {
         ZeroStage::None => bpp,
-        ZeroStage::Os => 8 / shard as u64 + 8,          // m/v sharded; params+grads full
-        ZeroStage::OsGrad => 10 / shard as u64 + 6,     // m/v+grad sharded
-        ZeroStage::OsGradParam => bpp / shard as u64,   // everything
+        ZeroStage::Os => 8 / shard as u64 + 8, // m/v sharded; params+grads full
+        ZeroStage::OsGrad => 10 / shard as u64 + 6, // m/v+grad sharded
+        ZeroStage::OsGradParam => bpp / shard as u64, // everything
     };
     Ok(local * per.max(1))
 }
@@ -248,11 +248,7 @@ fn train_cost(
     let link = spec.connectx7_bytes_per_sec();
     let gbytes = Precision::Bf16.packed_bytes(cfg.param_count().unwrap_or(1)) as f64
         / (ep * tp * pp * dp).max(1) as f64;
-    let ar = if dp > 1 {
-        2.0 * (dp as f64 - 1.0) / dp as f64 * gbytes / link
-    } else {
-        0.0
-    };
+    let ar = if dp > 1 { 2.0 * (dp as f64 - 1.0) / dp as f64 * gbytes / link } else { 0.0 };
     let tp_ar = if tp > 1 {
         4.0 * cfg.num_hidden_layers as f64 * 2.0 * (tp as f64 - 1.0) / tp as f64
             * cfg.hidden_size as f64
@@ -345,7 +341,8 @@ fn any_feasible(
                     continue;
                 }
                 let dp = tp_dp / tp;
-                for &zero in &[ZeroStage::OsGradParam, ZeroStage::OsGrad, ZeroStage::Os, ZeroStage::None]
+                for &zero in
+                    &[ZeroStage::OsGradParam, ZeroStage::OsGrad, ZeroStage::Os, ZeroStage::None]
                 {
                     for &ckpt in &[CkptPolicy::Layer, CkptPolicy::Selective, CkptPolicy::None] {
                         for &offload in &[
@@ -432,92 +429,106 @@ pub fn plan_train(
                     continue;
                 }
                 let dp = tp_dp / tp;
-                for &zero in &[ZeroStage::OsGradParam, ZeroStage::OsGrad, ZeroStage::Os, ZeroStage::None]
+                for &zero in
+                    &[ZeroStage::OsGradParam, ZeroStage::OsGrad, ZeroStage::Os, ZeroStage::None]
                 {
                     for &ckpt in &[CkptPolicy::Layer, CkptPolicy::Selective, CkptPolicy::None] {
-                    for &offload in &[
-                        OffloadPolicy::None,
-                        OffloadPolicy::Optimizer,
-                        OffloadPolicy::OptimizerParam,
-                    ] {
-                        let state = device_buffer_bytes(
-                            cfg, ep, tp, pp, dp, zero, mixed_fp8, offload,
-                        )?;
-                        let micro = (global_batch / dp.max(1)).max(1);
-                        let act = act_bytes_per_node(
-                            cfg,
-                            if mixed_fp8 { Precision::Fp8 } else { Precision::Bf16 },
-                            pp,
-                            tp,
-                            seq,
-                            micro,
-                            ckpt,
-                        );
-                        let (mut peaks, _rec, _reloads, sim_ok, overflow) =
-                            simulate_regions(cfg, &regions, ep, tp, pp, seq, micro, state, act);
-                        let buffer_need = state + act;
-                        if !sim_ok {
-                            let floor = kernel_region_floor();
-                            peaks.code = floor.code;
-                            peaks.scratch = floor.scratch;
-                            peaks.buffer = buffer_need;
-                        }
-                        let fits = sim_ok && buffer_need <= regions.buffer.bytes && peaks.exceeds(&regions).is_none();
-                        let _ = overflow;
-                        let step = train_cost(
-                            cfg, &spec, n, ep, tp, pp, dp, seq, global_batch, mixed_fp8, ckpt,
-                            offload,
-                        );
-                        let ck_frac = match ckpt {
-                            CkptPolicy::None => 0.0,
-                            CkptPolicy::Layer => 0.30,
-                            CkptPolicy::Selective => 0.15,
-                        };
-                        let tps = (global_batch * seq) as f64 / step.max(1e-12);
-                        let plan = TrainPlan {
-                            model: cfg.name.clone(),
-                            n,
-                            mixed_fp8,
-                            feasible: fits,
-                            ep,
-                            tp,
-                            pp,
-                            dp,
-                            zero,
-                            ckpt,
-                            offload,
-                            microbatch: micro,
-                            peaks,
-                            cap: regions.clone(),
-                            usable_buffer: regions.buffer.bytes,
-                            recompute_overhead: ck_frac,
-                            step_seconds: step,
-                            tokens_per_sec: tps,
-                            seq,
-                            global_batch,
-                            min_n: None,
-                            min_buffer: buffer_need,
-                            pick_rationale: String::new(),
-                            assumptions: String::new(),
-                            officially_supported: topo.officially_supported(n),
-                        };
-                        if fits {
-                            best = Some(match best {
-                                None => plan,
-                                Some(b) => {
-                                    if plan.step_seconds < b.step_seconds {
-                                        plan
-                                    } else {
-                                        b
+                        for &offload in &[
+                            OffloadPolicy::None,
+                            OffloadPolicy::Optimizer,
+                            OffloadPolicy::OptimizerParam,
+                        ] {
+                            let state =
+                                device_buffer_bytes(cfg, ep, tp, pp, dp, zero, mixed_fp8, offload)?;
+                            let micro = (global_batch / dp.max(1)).max(1);
+                            let act = act_bytes_per_node(
+                                cfg,
+                                if mixed_fp8 { Precision::Fp8 } else { Precision::Bf16 },
+                                pp,
+                                tp,
+                                seq,
+                                micro,
+                                ckpt,
+                            );
+                            let (mut peaks, _rec, _reloads, sim_ok, overflow) =
+                                simulate_regions(cfg, &regions, ep, tp, pp, seq, micro, state, act);
+                            let buffer_need = state + act;
+                            if !sim_ok {
+                                let floor = kernel_region_floor();
+                                peaks.code = floor.code;
+                                peaks.scratch = floor.scratch;
+                                peaks.buffer = buffer_need;
+                            }
+                            let fits = sim_ok
+                                && buffer_need <= regions.buffer.bytes
+                                && peaks.exceeds(&regions).is_none();
+                            let _ = overflow;
+                            let step = train_cost(
+                                cfg,
+                                &spec,
+                                n,
+                                ep,
+                                tp,
+                                pp,
+                                dp,
+                                seq,
+                                global_batch,
+                                mixed_fp8,
+                                ckpt,
+                                offload,
+                            );
+                            let ck_frac = match ckpt {
+                                CkptPolicy::None => 0.0,
+                                CkptPolicy::Layer => 0.30,
+                                CkptPolicy::Selective => 0.15,
+                            };
+                            let tps = (global_batch * seq) as f64 / step.max(1e-12);
+                            let plan = TrainPlan {
+                                model: cfg.name.clone(),
+                                n,
+                                mixed_fp8,
+                                feasible: fits,
+                                ep,
+                                tp,
+                                pp,
+                                dp,
+                                zero,
+                                ckpt,
+                                offload,
+                                microbatch: micro,
+                                peaks,
+                                cap: regions.clone(),
+                                usable_buffer: regions.buffer.bytes,
+                                recompute_overhead: ck_frac,
+                                step_seconds: step,
+                                tokens_per_sec: tps,
+                                seq,
+                                global_batch,
+                                min_n: None,
+                                min_buffer: buffer_need,
+                                pick_rationale: String::new(),
+                                assumptions: String::new(),
+                                officially_supported: topo.officially_supported(n),
+                            };
+                            if fits {
+                                best = Some(match best {
+                                    None => plan,
+                                    Some(b) => {
+                                        if plan.step_seconds < b.step_seconds {
+                                            plan
+                                        } else {
+                                            b
+                                        }
                                     }
-                                }
-                            });
-                        } else if best.as_ref().map(|b| b.feasible).unwrap_or(false) {
-                            // keep feasible
-                        } else if best.as_ref().map(|b| b.min_buffer).unwrap_or(u64::MAX) > buffer_need {
-                            best = Some(plan);
+                                });
+                            } else if best.as_ref().map(|b| b.feasible).unwrap_or(false) {
+                                // keep feasible
+                            } else if best.as_ref().map(|b| b.min_buffer).unwrap_or(u64::MAX)
+                                > buffer_need
+                            {
+                                best = Some(plan);
+                            }
                         }
-                    }
                     }
                 }
             }
@@ -665,12 +676,33 @@ pub fn inference_region_peaks(weight_bytes: u64, kv: u64, act: u64) -> RegionPea
     let mut regions = DeviceMemory::dgx_spark();
     regions.buffer.bytes = 104 * (1u64 << 30);
     let bufs = vec![
-        BufferReq { id: "w".into(), bytes: weight_bytes.max(1), live_from: 0, live_to: 3, checkpoint: false },
-        BufferReq { id: "kv".into(), bytes: kv.max(1), live_from: 1, live_to: 3, checkpoint: false },
-        BufferReq { id: "act".into(), bytes: act.max(1), live_from: 2, live_to: 2, checkpoint: false },
+        BufferReq {
+            id: "w".into(),
+            bytes: weight_bytes.max(1),
+            live_from: 0,
+            live_to: 3,
+            checkpoint: false,
+        },
+        BufferReq {
+            id: "kv".into(),
+            bytes: kv.max(1),
+            live_from: 1,
+            live_to: 3,
+            checkpoint: false,
+        },
+        BufferReq {
+            id: "act".into(),
+            bytes: act.max(1),
+            live_from: 2,
+            live_to: 2,
+            checkpoint: false,
+        },
     ];
-    let launches: Vec<LaunchReq> =
-        kernels.into_iter().enumerate().map(|(i, k)| LaunchReq { at: i.min(3), kernel: k }).collect();
+    let launches: Vec<LaunchReq> = kernels
+        .into_iter()
+        .enumerate()
+        .map(|(i, k)| LaunchReq { at: i.min(3), kernel: k })
+        .collect();
     let hier = catnn_core::architecture::MemoryHierarchy::dgx_spark();
     let s = schedule::schedule(ScheduleRequest {
         buffers: &bufs,

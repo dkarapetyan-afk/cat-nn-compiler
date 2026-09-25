@@ -133,10 +133,34 @@ fn plan_mlp_schedule(budget: Option<MemoryBudget>) -> CatResult<ScheduledStep> {
     }
     let hier = MemoryHierarchy::desktop_cpu();
     let bufs = vec![
-        BufferReq { id: "x".into(), bytes: 4 * 16 * 4, live_from: 0, live_to: 5, checkpoint: false },
-        BufferReq { id: "z1".into(), bytes: 4 * 32 * 4, live_from: 1, live_to: 4, checkpoint: false },
-        BufferReq { id: "h1".into(), bytes: 4 * 32 * 4, live_from: 2, live_to: 3, checkpoint: false },
-        BufferReq { id: "pred".into(), bytes: 4 * 8 * 4, live_from: 3, live_to: 3, checkpoint: false },
+        BufferReq {
+            id: "x".into(),
+            bytes: 4 * 16 * 4,
+            live_from: 0,
+            live_to: 5,
+            checkpoint: false,
+        },
+        BufferReq {
+            id: "z1".into(),
+            bytes: 4 * 32 * 4,
+            live_from: 1,
+            live_to: 4,
+            checkpoint: false,
+        },
+        BufferReq {
+            id: "h1".into(),
+            bytes: 4 * 32 * 4,
+            live_from: 2,
+            live_to: 3,
+            checkpoint: false,
+        },
+        BufferReq {
+            id: "pred".into(),
+            bytes: 4 * 8 * 4,
+            live_from: 3,
+            live_to: 3,
+            checkpoint: false,
+        },
     ];
     let launches = vec![
         LaunchReq {
@@ -172,7 +196,12 @@ pub fn sgd_reference(p: &Tensor, g: &Tensor, lr: f32) -> CatResult<Tensor> {
     Sgd::new(lr).put(p, g)
 }
 
-pub fn adam_reference(p: &Tensor, g: &Tensor, s: &AdamState, opt: Adam) -> CatResult<(Tensor, AdamState)> {
+pub fn adam_reference(
+    p: &Tensor,
+    g: &Tensor,
+    s: &AdamState,
+    opt: Adam,
+) -> CatResult<(Tensor, AdamState)> {
     opt.put(p, g, s)
 }
 
@@ -242,9 +271,8 @@ pub fn mixtral_step(
     }
     let h = cfg.hidden_size;
     let hd = cfg.head_dim()?;
-    let targets: Vec<u32> = (0..batch * seq)
-        .map(|i| tokens[(i + 1) % tokens.len()] % cfg.vocab_size as u32)
-        .collect();
+    let targets: Vec<u32> =
+        (0..batch * seq).map(|i| tokens[(i + 1) % tokens.len()] % cfg.vocab_size as u32).collect();
     let mut x = moe::embedding(tokens, &w.embed, h)?;
     x.ty = TensorType::f32([batch, seq, h]);
     let mut xs = vec![x.clone()];
@@ -277,7 +305,8 @@ pub fn mixtral_step(
     // LM head adjoint: w is [V,H], forward transposes to [H,V].
     let wt = transpose2(&w.lm_head, cfg.vocab_size, h)?;
     let xf_flat = Tensor::from_vec(TensorType::f32([batch * seq, h]), xf.data.clone())?;
-    let dlog_flat = Tensor::from_vec(TensorType::f32([batch * seq, cfg.vocab_size]), dlogits.data.clone())?;
+    let dlog_flat =
+        Tensor::from_vec(TensorType::f32([batch * seq, cfg.vocab_size]), dlogits.data.clone())?;
     let (dxf, dwt, _) = linear_backward(&xf_flat, &wt, &dlog_flat)?;
     let dlm = transpose2(&dwt, h, cfg.vocab_size)?;
     let mut dx = Tensor::from_vec(x.ty.clone(), dxf.data)?;
@@ -442,7 +471,11 @@ pub fn plan_mixtral_tiny_schedule(budget: Option<MemoryBudget>) -> CatResult<Sch
         });
         launches.push(LaunchReq {
             at: t,
-            kernel: describe(&OpenOp::RmsNorm { eps_e6: 10 }, &format!("L{layer}.rms"), KernelBackend::CpuRust),
+            kernel: describe(
+                &OpenOp::RmsNorm { eps_e6: 10 },
+                &format!("L{layer}.rms"),
+                KernelBackend::CpuRust,
+            ),
         });
         launches.push(LaunchReq {
             at: t + 1,
@@ -593,16 +626,40 @@ pub fn plan_mixtral_layer_train(budget: Option<MemoryBudget>) -> CatResult<Sched
     let expert = 3 * h * inter * 2;
     let attn_w = h * (h + 2 * (h / 4) + h) * 2;
     let bufs = vec![
-        BufferReq { id: "W.attn".into(), bytes: attn_w, live_from: 0, live_to: 14, checkpoint: false },
-        BufferReq { id: "W.experts".into(), bytes: expert * 2, live_from: 0, live_to: 14, checkpoint: false },
+        BufferReq {
+            id: "W.attn".into(),
+            bytes: attn_w,
+            live_from: 0,
+            live_to: 14,
+            checkpoint: false,
+        },
+        BufferReq {
+            id: "W.experts".into(),
+            bytes: expert * 2,
+            live_from: 0,
+            live_to: 14,
+            checkpoint: false,
+        },
         BufferReq { id: "x_in".into(), bytes: act, live_from: 0, live_to: 13, checkpoint: false },
         BufferReq { id: "xn".into(), bytes: act, live_from: 1, live_to: 3, checkpoint: false },
         BufferReq { id: "attn".into(), bytes: act, live_from: 2, live_to: 3, checkpoint: false },
         BufferReq { id: "x_mid".into(), bytes: act, live_from: 3, live_to: 11, checkpoint: false },
         BufferReq { id: "xm".into(), bytes: act, live_from: 4, live_to: 6, checkpoint: false },
         BufferReq { id: "moe".into(), bytes: act, live_from: 6, live_to: 7, checkpoint: false },
-        BufferReq { id: "dlogits".into(), bytes: act, live_from: 8, live_to: 13, checkpoint: false },
-        BufferReq { id: "dW".into(), bytes: attn_w + expert * 2, live_from: 8, live_to: 14, checkpoint: false },
+        BufferReq {
+            id: "dlogits".into(),
+            bytes: act,
+            live_from: 8,
+            live_to: 13,
+            checkpoint: false,
+        },
+        BufferReq {
+            id: "dW".into(),
+            bytes: attn_w + expert * 2,
+            live_from: 8,
+            live_to: 14,
+            checkpoint: false,
+        },
     ];
 
     let rms = describe(&OpenOp::RmsNorm { eps_e6: 10 }, "L.rms", KernelBackend::CudaSm121)
@@ -631,7 +688,11 @@ pub fn plan_mixtral_layer_train(budget: Option<MemoryBudget>) -> CatResult<Sched
         "L.swiglu",
         KernelBackend::CudaSm121,
     )
-    .with_buffers(vec![buf("xm", act), buf("W.experts", expert * 2)], vec![buf("moe", act)], vec![]);
+    .with_buffers(
+        vec![buf("xm", act), buf("W.experts", expert * 2)],
+        vec![buf("moe", act)],
+        vec![],
+    );
     let rms_b = describe(&OpenOp::RmsNorm { eps_e6: 10 }, "L.rms_bwd", KernelBackend::CudaSm121);
     let gqa_b = describe(
         &OpenOp::GqaAttention {
@@ -654,7 +715,14 @@ pub fn plan_mixtral_layer_train(budget: Option<MemoryBudget>) -> CatResult<Sched
     let launches = vec![
         LaunchReq { at: 1, kernel: rms.clone() },
         LaunchReq { at: 2, kernel: gqa.clone() },
-        LaunchReq { at: 4, kernel: describe(&OpenOp::RmsNorm { eps_e6: 10 }, "L.rms_moe", KernelBackend::CudaSm121) },
+        LaunchReq {
+            at: 4,
+            kernel: describe(
+                &OpenOp::RmsNorm { eps_e6: 10 },
+                "L.rms_moe",
+                KernelBackend::CudaSm121,
+            ),
+        },
         LaunchReq { at: 5, kernel: router },
         LaunchReq { at: 6, kernel: swiglu.clone() },
         LaunchReq { at: 9, kernel: swiglu_b },
@@ -719,7 +787,8 @@ mod tests {
 
     #[test]
     fn mlp_loss_decreases() {
-        let r = train_mlp(&TrainOptions { steps: 12, lr: 0.05, ..TrainOptions::default() }).unwrap();
+        let r =
+            train_mlp(&TrainOptions { steps: 12, lr: 0.05, ..TrainOptions::default() }).unwrap();
         assert!(r.losses[0] > r.losses[r.losses.len() - 1], "{:?}", r.losses);
         assert!(r.schedule.feasible);
         assert!(r.schedule.peaks.exceeds(&r.schedule.cap).is_none());
@@ -763,10 +832,12 @@ mod tests {
     fn shrinking_buffer_increases_recompute() {
         let loose = plan_mlp_schedule(Some(MemoryBudget::buffer_only(8 << 20))).unwrap();
         let tight = plan_mlp_schedule(Some(MemoryBudget::buffer_only(512))).unwrap();
-        assert!(tight.recompute_overhead + tight.kernel_reloads as f64
-            >= loose.recompute_overhead + loose.kernel_reloads as f64
-            || !tight.feasible
-            || tight.cells.len() >= loose.cells.len());
+        assert!(
+            tight.recompute_overhead + tight.kernel_reloads as f64
+                >= loose.recompute_overhead + loose.kernel_reloads as f64
+                || !tight.feasible
+                || tight.cells.len() >= loose.cells.len()
+        );
         if tight.feasible {
             assert!(tight.step_seconds + 1e-12 >= loose.step_seconds * 0.99);
         }
@@ -778,9 +849,18 @@ mod tests {
         assert!(s.feasible, "{}", s.rationale);
         assert!(s.peaks.exceeds(&s.cap).is_none());
         assert!(crate::schedule::arena_conflict(&s.arena).is_none());
-        assert!(s.events.iter().any(|e| matches!(e.kind, crate::schedule::EventKind::LoadKernel { .. })));
-        assert!(s.events.iter().any(|e| matches!(e.kind, crate::schedule::EventKind::AllocBuffer { .. })));
-        assert!(s.events.iter().any(|e| matches!(e.kind, crate::schedule::EventKind::Launch { .. })));
+        assert!(s
+            .events
+            .iter()
+            .any(|e| matches!(e.kind, crate::schedule::EventKind::LoadKernel { .. })));
+        assert!(s
+            .events
+            .iter()
+            .any(|e| matches!(e.kind, crate::schedule::EventKind::AllocBuffer { .. })));
+        assert!(s
+            .events
+            .iter()
+            .any(|e| matches!(e.kind, crate::schedule::EventKind::Launch { .. })));
     }
 
     #[test]

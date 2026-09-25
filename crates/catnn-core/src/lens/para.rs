@@ -103,13 +103,13 @@ pub struct ChainRuleWitness {
 }
 
 impl ChainRuleWitness {
-    pub fn accept(left: impl Into<String>, right: impl Into<String>, max_abs: f32, tol: f32) -> Self {
-        Self {
-            left: left.into(),
-            right: right.into(),
-            max_abs,
-            verified: max_abs <= tol,
-        }
+    pub fn accept(
+        left: impl Into<String>,
+        right: impl Into<String>,
+        max_abs: f32,
+        tol: f32,
+    ) -> Self {
+        Self { left: left.into(), right: right.into(), max_abs, verified: max_abs <= tol }
     }
 }
 
@@ -120,7 +120,8 @@ mod tests {
 
     #[test]
     fn compose_is_a_seq_tree() {
-        let f = ParaMorphism::op("fc", OpenOp::Linear { in_features: 4, out_features: 8, bias: true });
+        let f =
+            ParaMorphism::op("fc", OpenOp::Linear { in_features: 4, out_features: 8, bias: true });
         let g = ParaMorphism::op("act", OpenOp::Relu);
         let h = f.then(g);
         assert!(matches!(h.body, ParaBody::Seq(_, _)));
