@@ -148,6 +148,7 @@ pub fn spark_cluster(n: usize, topology: SparkTopology) -> CatResult<Cluster> {
                 kind: DeviceKind::Gpu,
                 memory_bytes: spec.memory_bytes,
                 gflops: spec.peak_flops(Precision::Fp4) / 1e9,
+                regions: crate::architecture::memory::DeviceMemory::dgx_spark(),
             }],
         ));
     }
@@ -175,7 +176,19 @@ pub fn spark_cluster(n: usize, topology: SparkTopology) -> CatResult<Cluster> {
         }
     }
     let tag = if topology.officially_supported(n) { "official" } else { "manual-unsupported" };
-    Ok(Cluster { name: format!("dgx-spark-N{n}-{tag}"), nodes, links })
+    let mut memory = crate::architecture::memory::MemoryHierarchy::dgx_spark();
+    if n > 1 {
+        if let Some(remote) = memory.remote.as_mut() {
+            remote.bytes = spec.memory_bytes.saturating_mul((n - 1) as u64);
+        }
+    }
+    Ok(Cluster {
+        name: format!("dgx-spark-N{n}-{tag}"),
+        nodes,
+        links,
+        memory,
+        budget: None,
+    })
 }
 
 #[cfg(test)]

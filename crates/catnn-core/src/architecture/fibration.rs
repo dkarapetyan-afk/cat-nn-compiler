@@ -137,6 +137,26 @@ pub fn reindex(f: &ArchMorphism, r: &Realization) -> CatResult<Realization> {
             }
             let _ = op;
         }
+        ArchRefinementKind::TightenMemory { region, from_bytes, to_bytes } => {
+            // The memory spec indexes R: each region has its own 2-cells.
+            use crate::architecture::memory::MemoryRegionKind;
+            use crate::category::two_cell::TwoCell;
+            match region {
+                MemoryRegionKind::Buffer => {
+                    out.cells.push(TwoCell::recompute("*", "layer-checkpoint"));
+                    if *to_bytes * 2 < *from_bytes {
+                        out.cells.push(TwoCell::offload("optimizer", "nvme"));
+                    }
+                }
+                MemoryRegionKind::Code => {
+                    out.cells.push(TwoCell::kernel_residency("*", false));
+                    out.cells.push(TwoCell::fuse_code(vec!["*".into()]));
+                }
+                MemoryRegionKind::Scratch => {
+                    out.cells.push(TwoCell::fuse_code(vec!["occupancy-reduce".into()]));
+                }
+            }
+        }
     }
     Ok(out)
 }
@@ -176,6 +196,48 @@ mod tests {
         let arch = mlp();
         let fibre = enumerate_realizations(&arch, &Cluster::single_cpu());
         reindex_id_is_id(&arch, &fibre.objects[0]).unwrap();
+    }
+
+    #[test]
+    fn tighten_memory_attaches_recompute_cell() {
+        let cluster = Cluster::single_cpu();
+        let r = Realization::new("r", "mlp", &cluster);
+        let f = ArchMorphism::tighten_memory(
+            &mlp(),
+            crate::architecture::MemoryRegionKind::Buffer,
+            1 << 30,
+            1 << 20,
+        );
+        let pulled = reindex(&f, &r).unwrap();
+        assert!(pulled.cells.iter().any(|c| matches!(
+            c.rewrite,
+            crate::category::Rewrite::Recompute { .. }
+        )));
+        assert!(pulled.cells.iter().any(|c| matches!(
+            c.rewrite,
+            crate::category::Rewrite::Offload { .. }
+        )));
+    }
+
+    #[test]
+    fn tighten_code_attaches_residency_and_fuse() {
+        let cluster = Cluster::single_cpu();
+        let r = Realization::new("r", "mlp", &cluster);
+        let f = ArchMorphism::tighten_memory(
+            &mlp(),
+            crate::architecture::MemoryRegionKind::Code,
+            64 << 20,
+            4 << 20,
+        );
+        let pulled = reindex(&f, &r).unwrap();
+        assert!(pulled.cells.iter().any(|c| matches!(
+            c.rewrite,
+            crate::category::Rewrite::KernelResidency { .. }
+        )));
+        assert!(pulled.cells.iter().any(|c| matches!(
+            c.rewrite,
+            crate::category::Rewrite::FuseCode { .. }
+        )));
     }
 
     #[test]

@@ -61,6 +61,9 @@ pub struct MixtralPlan {
     pub cuda: Vec<CudaKernel>,
     pub nvcc_validated: Option<bool>,
     pub nvcc_note: String,
+    pub peak_code: u64,
+    pub peak_buffer: u64,
+    pub peak_scratch: u64,
 }
 
 fn divisors(n: usize) -> Vec<usize> {
@@ -232,6 +235,7 @@ pub fn plan_mixtral(
         Err(e) => (Some(false), e),
     };
 
+    let peaks = crate::spark_train::inference_region_peaks(mem.weights, mem.kv, mem.act);
     let placement_summary = format!(
         "{}: experts striped EP={ep}×TP={tp} ({} expert-shards/node), attention TP={tp} \
          (replicated across EP), layers PP={pp} ({} layers/stage). Devices: {}.",
@@ -274,6 +278,9 @@ pub fn plan_mixtral(
         cuda,
         nvcc_validated,
         nvcc_note,
+        peak_code: peaks.code,
+        peak_buffer: peaks.buffer.max(mem.total),
+        peak_scratch: peaks.scratch,
     })
 }
 
@@ -609,18 +616,20 @@ pub fn sweep(
 /// Format the sweep as a fixed-width table.
 pub fn format_table(plans: &[MixtralPlan]) -> String {
     let mut s = String::from(
-        "model              N  prec  feasible  GiB/node  usable   EP/TP/PP  tok/s    official  note\n",
+        "model              N  prec  feasible  GiB/node  codeKiB  scrB  usable   EP/TP/PP  tok/s    official  note\n",
     );
-    s.push_str(&"-".repeat(110));
+    s.push_str(&"-".repeat(130));
     s.push('\n');
     for p in plans {
         s.push_str(&format!(
-            "{:<18} {:>2}  {:<4}  {:<8}  {:>7.1}  {:>6.1}   {:>2}/{:<2}/{:<2}  {:>7.2}  {:<9} {}\n",
+            "{:<18} {:>2}  {:<4}  {:<8}  {:>7.1}  {:>7.1} {:>5} {:>6.1}   {:>2}/{:<2}/{:<2}  {:>7.2}  {:<9} {}\n",
             p.model,
             p.n,
             p.precision.as_str(),
             if p.feasible { "yes" } else { "NO" },
             p.per_node_bytes as f64 / (1u64 << 30) as f64,
+            p.peak_code as f64 / 1024.0,
+            p.peak_scratch,
             p.usable_bytes as f64 / (1u64 << 30) as f64,
             p.ep,
             p.tp,

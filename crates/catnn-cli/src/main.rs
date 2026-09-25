@@ -6,8 +6,11 @@ use std::path::PathBuf;
 use anyhow::{bail, Context, Result};
 use catnn_compile::kernel::moe::{self, MixtralWeights};
 use catnn_compile::spark_place::{self, format_rationales, format_table};
+use catnn_compile::spark_train::{self, format_train_rationales, format_train_table};
+use catnn_compile::train::{self, TrainOptions};
 use catnn_compile::{compile, Compiled};
-use catnn_core::architecture::{spark_cluster, Cluster, Precision, SparkTopology};
+use catnn_core::architecture::{spark_cluster, Cluster, MemoryBudget, Precision, SparkTopology};
+use catnn_core::lens::OptimizerKind;
 use catnn_core::spec::{
     mixtral_architecture, mlp_spec, parse_auto, transformer_block_spec, MixtralConfig, NetworkSpec,
 };
@@ -33,6 +36,11 @@ enum Cmd {
         cluster: String,
         #[arg(short, long)]
         output: Option<PathBuf>,
+        /// Structured budget: `64GiB` or `code=4MiB,buffer=64GiB,scratch=128KiB`.
+        #[arg(long)]
+        mem: Option<String>,
+        #[arg(long)]
+        mem_per_device: Option<String>,
     },
     /// Compile and execute on the cluster model. Checks against the reference.
     Run {
@@ -43,6 +51,10 @@ enum Cmd {
         adapt: bool,
         #[arg(long, default_value_t = 42)]
         seed: u64,
+        #[arg(long)]
+        mem: Option<String>,
+        #[arg(long)]
+        mem_per_device: Option<String>,
     },
     /// One adaptation step of the unlawful optic.
     Adapt {
@@ -51,12 +63,51 @@ enum Cmd {
         cluster: String,
         #[arg(long, default_value_t = 42)]
         seed: u64,
+        #[arg(long)]
+        mem: Option<String>,
+        #[arg(long)]
+        mem_per_device: Option<String>,
     },
     /// Print architecture, fibre of realizations, and (if compiled) placement.
     Inspect {
         spec: String,
         #[arg(long, default_value = "demo")]
         cluster: String,
+        #[arg(long)]
+        mem: Option<String>,
+        #[arg(long)]
+        mem_per_device: Option<String>,
+    },
+    /// CPU training loop (MLP or mixtral-tiny) under a memory budget.
+    Train {
+        spec: String,
+        #[arg(long, default_value_t = 8)]
+        steps: usize,
+        #[arg(long, default_value = "sgd")]
+        opt: String,
+        #[arg(long, default_value_t = 0.05)]
+        lr: f64,
+        #[arg(long, default_value_t = 7)]
+        seed: u64,
+        #[arg(long)]
+        mem: Option<String>,
+        #[arg(long)]
+        mem_per_device: Option<String>,
+    },
+    /// Place Mixtral *training* on N Sparks (bf16+fp32 Adam, optional fp8).
+    MixtralTrainSweep {
+        #[arg(long, default_value = "both")]
+        model: String,
+        #[arg(long, default_value_t = 2048)]
+        seq: usize,
+        #[arg(long, default_value_t = 8)]
+        global_batch: usize,
+        #[arg(long)]
+        mem: Option<String>,
+        #[arg(long)]
+        mem_per_device: Option<String>,
+        #[arg(long, default_value_t = false)]
+        fp8: bool,
     },
     /// Place Mixtral 8x7B / 8x22B on N DGX Sparks × {bf16,fp8,fp4}.
     MixtralSweep {
@@ -80,14 +131,43 @@ enum Cmd {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
-        Cmd::Compile { spec, cluster, output } => cmd_compile(&spec, &cluster, output.as_ref()),
-        Cmd::Run { spec, cluster, adapt, seed } => cmd_run(&spec, &cluster, adapt, seed),
-        Cmd::Adapt { spec, cluster, seed } => cmd_run(&spec, &cluster, true, seed),
-        Cmd::Inspect { spec, cluster } => cmd_inspect(&spec, &cluster),
+        Cmd::Compile { spec, cluster, output, mem, mem_per_device } => {
+            cmd_compile(&spec, &cluster, output.as_ref(), mem.as_deref(), mem_per_device.as_deref())
+        }
+        Cmd::Run { spec, cluster, adapt, seed, mem, mem_per_device } => {
+            cmd_run(&spec, &cluster, adapt, seed, mem.as_deref(), mem_per_device.as_deref())
+        }
+        Cmd::Adapt { spec, cluster, seed, mem, mem_per_device } => {
+            cmd_run(&spec, &cluster, true, seed, mem.as_deref(), mem_per_device.as_deref())
+        }
+        Cmd::Inspect { spec, cluster, mem, mem_per_device } => {
+            cmd_inspect(&spec, &cluster, mem.as_deref(), mem_per_device.as_deref())
+        }
+        Cmd::Train { spec, steps, opt, lr, seed, mem, mem_per_device } => {
+            cmd_train(&spec, steps, &opt, lr, seed, mem.as_deref(), mem_per_device.as_deref())
+        }
         Cmd::MixtralSweep { model, context, batch, weights } => {
             cmd_mixtral_sweep(&model, context, batch, weights.as_deref())
         }
+        Cmd::MixtralTrainSweep { model, seq, global_batch, mem, mem_per_device, fp8 } => {
+            cmd_mixtral_train_sweep(
+                &model,
+                seq,
+                global_batch,
+                mem.as_deref(),
+                mem_per_device.as_deref(),
+                fp8,
+            )
+        }
         Cmd::MixtralTiny { seed } => cmd_mixtral_tiny(seed),
+    }
+}
+
+fn parse_mem_flags(mem: Option<&str>, mem_per_device: Option<&str>) -> Result<Option<MemoryBudget>> {
+    if let Some(s) = mem.or(mem_per_device) {
+        Ok(Some(MemoryBudget::parse(s)?))
+    } else {
+        Ok(None)
     }
 }
 
@@ -135,7 +215,13 @@ fn infer_input(arch: &Architecture, seed: u64) -> Result<Tensor> {
     Ok(Tensor::lcg(ty, seed))
 }
 
-fn cmd_compile(spec: &str, cluster: &str, output: Option<&PathBuf>) -> Result<()> {
+fn cmd_compile(
+    spec: &str,
+    cluster: &str,
+    output: Option<&PathBuf>,
+    mem: Option<&str>,
+    mem_per_device: Option<&str>,
+) -> Result<()> {
     if spec.starts_with("mixtral") && cluster.starts_with("spark") {
         let n: usize = cluster.strip_prefix("spark").unwrap_or("1").parse().unwrap_or(1);
         let cfg = if spec.contains("22") {
@@ -152,12 +238,25 @@ fn cmd_compile(spec: &str, cluster: &str, output: Option<&PathBuf>) -> Result<()
         println!("  why: {}", plan.pick_rationale);
         println!("  {}", plan.placement_summary);
         println!("  CUDA sm_121 kernels: {} ({})", plan.cuda.len(), plan.nvcc_note);
+        println!(
+            "  region peaks: code={:.1} KiB buffer={:.1} GiB scratch={} B",
+            plan.peak_code as f64 / 1024.0,
+            plan.peak_buffer as f64 / (1u64 << 30) as f64,
+            plan.peak_scratch
+        );
         if !plan.feasible {
             println!("INFEASIBLE — no bogus schedule emitted as executable.");
         }
     }
     let arch = load_arch(spec)?;
-    let cluster = load_cluster(cluster)?;
+    let mut cluster = load_cluster(cluster)?;
+    if let Some(b) = parse_mem_flags(mem, mem_per_device)? {
+        cluster = cluster.with_budget(b);
+        println!(
+            "memory budget: code={:?} buffer={} scratch={:?}",
+            b.code, b.buffer, b.scratch
+        );
+    }
     let compiled = compile(&arch, &cluster)?;
     println!("architecture: {}", arch.id);
     println!("ir nodes: {}", compiled.graph.nodes.len());
@@ -250,7 +349,14 @@ fn cmd_mixtral_sweep(
     Ok(())
 }
 
-fn cmd_run(spec: &str, cluster: &str, adapt: bool, seed: u64) -> Result<()> {
+fn cmd_run(
+    spec: &str,
+    cluster: &str,
+    adapt: bool,
+    seed: u64,
+    mem: Option<&str>,
+    mem_per_device: Option<&str>,
+) -> Result<()> {
     if spec == "mixtral-tiny" {
         return cmd_mixtral_tiny(seed);
     }
@@ -258,7 +364,10 @@ fn cmd_run(spec: &str, cluster: &str, adapt: bool, seed: u64) -> Result<()> {
         bail!("full-size Mixtral cannot run on this VM (~93–280 GB weights). Use `catnn mixtral-tiny` or `catnn mixtral-sweep`.");
     }
     let arch = load_arch(spec)?;
-    let cluster = load_cluster(cluster)?;
+    let mut cluster = load_cluster(cluster)?;
+    if let Some(b) = parse_mem_flags(mem, mem_per_device)? {
+        cluster = cluster.with_budget(b);
+    }
     let compiled = compile(&arch, &cluster)?;
     let input = infer_input(&arch, seed)?;
     let report = execute(&compiled, &input, adapt)?;
@@ -294,9 +403,17 @@ fn cmd_run(spec: &str, cluster: &str, adapt: bool, seed: u64) -> Result<()> {
     Ok(())
 }
 
-fn cmd_inspect(spec: &str, cluster: &str) -> Result<()> {
+fn cmd_inspect(
+    spec: &str,
+    cluster: &str,
+    mem: Option<&str>,
+    mem_per_device: Option<&str>,
+) -> Result<()> {
     let arch = load_arch(spec)?;
-    let cluster = load_cluster(cluster)?;
+    let mut cluster = load_cluster(cluster)?;
+    if let Some(b) = parse_mem_flags(mem, mem_per_device)? {
+        cluster = cluster.with_budget(b);
+    }
     println!("== architecture {} ==", arch.id);
     println!("input:  {}", arch.input());
     println!("output: {}", arch.output());
@@ -321,6 +438,94 @@ fn cmd_inspect(spec: &str, cluster: &str) -> Result<()> {
     }
     println!("fusions: {:?}", compiled.realization.fusions);
     println!("generated WGSL: {}", compiled.wgsl.len());
+    println!(
+        "H memory: buffer {} B, code {} B, scratch {} B ({})",
+        cluster.memory.regions.buffer.bytes,
+        cluster.memory.regions.code.bytes,
+        cluster.memory.regions.scratch.bytes,
+        cluster.memory.regions.buffer.provenance
+    );
+    Ok(())
+}
+
+fn cmd_train(
+    spec: &str,
+    steps: usize,
+    opt: &str,
+    lr: f64,
+    seed: u64,
+    mem: Option<&str>,
+    mem_per_device: Option<&str>,
+) -> Result<()> {
+    let opts = TrainOptions {
+        steps,
+        lr: lr as f32,
+        opt: OptimizerKind::parse(opt)?,
+        budget: parse_mem_flags(mem, mem_per_device)?,
+        seed,
+    };
+    let report = if spec == "mixtral-tiny" || spec.contains("mixtral") {
+        if spec.contains("8x7") || spec.contains("8x22") {
+            bail!("full-size Mixtral training is planned, not executed. Use mixtral-tiny or mixtral-train-sweep.");
+        }
+        train::train_mixtral_tiny(&opts)?
+    } else {
+        train::train_mlp(&opts)?
+    };
+    println!("train {spec} opt={opt} steps={steps} lr={lr}");
+    println!("losses: {:?}", report.losses);
+    println!("final params checksum: {:016x}", report.final_params_checksum);
+    println!(
+        "schedule: feasible={} peaks code={} buffer={} scratch={} ({})",
+        report.schedule.feasible,
+        report.schedule.peaks.code,
+        report.schedule.peaks.buffer,
+        report.schedule.peaks.scratch,
+        report.schedule.rationale
+    );
+    if !report.schedule.feasible {
+        println!(
+            "INFEASIBLE region: {:?}",
+            report.schedule.overflow_region
+        );
+    }
+    println!("executed: CPU training step (forward, loss, adjoint, optimizer).");
+    println!("not executed: GPU kernels, full-size Mixtral, HF weights.");
+    Ok(())
+}
+
+fn cmd_mixtral_train_sweep(
+    model: &str,
+    seq: usize,
+    global_batch: usize,
+    mem: Option<&str>,
+    mem_per_device: Option<&str>,
+    fp8: bool,
+) -> Result<()> {
+    let models: Vec<MixtralConfig> = match model {
+        "8x7b" | "mixtral-8x7b" => vec![MixtralConfig::mixtral_8x7b()],
+        "8x22b" | "mixtral-8x22b" => vec![MixtralConfig::mixtral_8x22b()],
+        _ => vec![MixtralConfig::mixtral_8x7b(), MixtralConfig::mixtral_8x22b()],
+    };
+    let budget = parse_mem_flags(mem, mem_per_device)?;
+    let rows = spark_train::sweep_train(&models, &[1, 2, 4, 8], seq, global_batch, budget, fp8)?;
+    println!("DGX Spark Mixtral *training* sweep");
+    println!("bf16 weights/grads + fp32 master + Adam m/v (16 B/param). Optional --fp8.");
+    println!("seq={seq} global_batch={global_batch}. Usable buffer defaults to 104 GiB.");
+    println!();
+    print!("{}", format_train_table(&rows));
+    println!();
+    print!("{}", format_train_rationales(&rows));
+    println!();
+    if let Some(p) = rows.first() {
+        println!("assumptions: {}", p.assumptions);
+    }
+    match train::mixtral_layer_timeline_excerpt() {
+        Ok(ex) => print!("{ex}"),
+        Err(e) => println!("timeline excerpt: {e}"),
+    }
+    println!("executed: placement search + simulated timeline (CPU).");
+    println!("not executed: full-size training, GPU, nvcc cubin measurement.");
     Ok(())
 }
 

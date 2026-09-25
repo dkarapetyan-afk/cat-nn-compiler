@@ -22,6 +22,16 @@ pub enum Rewrite {
     Partition { op: String, parts: usize },
     /// Identity 2-cell (reflexivity of equivalence).
     Refl,
+    /// Store an activation vs rematerialize it in the adjoint (checkpoint).
+    Recompute { tensor: String, policy: String },
+    /// Move a live tensor onto a slower tier and prefetch it back.
+    Offload { tensor: String, tier: String },
+    /// ZeRO / FSDP-style shard of params, grads, or optimizer state.
+    Shard { tensor: String, kind: String, parts: usize },
+    /// Keep a kernel module resident vs reload it from buffer/NVMe.
+    KernelResidency { kernel: String, resident: bool },
+    /// Fuse kernels to shrink the code-region footprint.
+    FuseCode { kernels: Vec<String> },
 }
 
 /// Numerical / observational witness that `src ~ tgt`.
@@ -120,6 +130,52 @@ impl TwoCell {
             target_name: op.clone(),
             rewrite: Rewrite::Reassign { op, from_device: from, to_device: to },
             witness: EquivWitness::tight(),
+        }
+    }
+
+    pub fn offload(tensor: impl Into<String>, tier: impl Into<String>) -> Self {
+        let tensor = tensor.into();
+        let tier = tier.into();
+        Self {
+            name: format!("offload:{tensor}:{tier}"),
+            source_name: format!("device:{tensor}"),
+            target_name: format!("{tier}:{tensor}"),
+            rewrite: Rewrite::Offload { tensor, tier },
+            witness: EquivWitness::relaxed(),
+        }
+    }
+
+    pub fn kernel_residency(kernel: impl Into<String>, resident: bool) -> Self {
+        let kernel = kernel.into();
+        Self {
+            name: format!("residency:{kernel}:{}", if resident { "keep" } else { "reload" }),
+            source_name: format!("resident:{kernel}"),
+            target_name: format!("{}:{kernel}", if resident { "keep" } else { "reload" }),
+            rewrite: Rewrite::KernelResidency { kernel, resident },
+            witness: EquivWitness::relaxed(),
+        }
+    }
+
+    pub fn fuse_code(kernels: Vec<String>) -> Self {
+        let name = format!("fuse-code:{}", kernels.join("+"));
+        Self {
+            name: name.clone(),
+            source_name: kernels.join("∥"),
+            target_name: kernels.join("+"),
+            rewrite: Rewrite::FuseCode { kernels },
+            witness: EquivWitness::relaxed(),
+        }
+    }
+
+    pub fn recompute(tensor: impl Into<String>, policy: impl Into<String>) -> Self {
+        let tensor = tensor.into();
+        let policy = policy.into();
+        Self {
+            name: format!("recompute:{tensor}:{policy}"),
+            source_name: format!("store:{tensor}"),
+            target_name: format!("recompute:{tensor}"),
+            rewrite: Rewrite::Recompute { tensor, policy },
+            witness: EquivWitness::relaxed(),
         }
     }
 

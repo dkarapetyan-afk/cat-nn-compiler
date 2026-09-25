@@ -15,8 +15,11 @@ is explicit in the types.
 
 ```bash
 # built-in examples
-cargo run -p catnn-cli -- compile mlp --cluster demo
+cargo run -p catnn-cli -- compile mlp --cluster demo --mem code=4MiB,buffer=64GiB,scratch=128KiB
 cargo run -p catnn-cli -- run mlp --cluster demo
+cargo run -p catnn-cli -- train mlp --steps 12 --opt sgd --lr 0.05
+cargo run -p catnn-cli -- train mixtral-tiny --steps 4 --opt sgd --mem-per-device 256KiB
+cargo run -p catnn-cli -- mixtral-train-sweep --seq 2048 --global-batch 8
 cargo run -p catnn-cli -- adapt mlp --cluster demo
 cargo run -p catnn-cli -- inspect transformer --cluster demo
 
@@ -35,7 +38,7 @@ expected to pass.
 | `crates/catnn-core` | SMC of tensor interfaces, lenses / optics, open systems, cospans, architecture category `A`, hardware category `H`, fibration `R`, spec DSL + parsers |
 | `crates/catnn-compile` | Lowering `A → IR`, placement on `H`, CPU kernels (Rayon + `wide` SIMD), WGSL generation + naga validation, naïve reference |
 | `crates/catnn-rt` | Device handlers, cluster scheduler (threads + channels, optional TCP), temporal sheaf, adaptive optic |
-| `crates/catnn-cli` | `catnn compile \| run \| adapt \| inspect` |
+| `crates/catnn-cli` | `catnn compile \| run \| train \| adapt \| inspect \| mixtral-sweep \| mixtral-train-sweep` |
 
 ## Mapping: mathematics → Rust
 
@@ -46,16 +49,21 @@ Numbers refer to sections of the design document.
 | **§1 Classical lens** `get/put` with PutGet, GetPut, PutPut | `catnn_core::lens::lawful::LawfulLens`. Laws are methods that return `Err` on failure. Property-tested on `first_of_pair` and `identity_f64`. |
 | **§1 Higher lenses** | Truncated: we do not store 2-dimensional coherences of Capriotti–Danielsson–Vezzosi. The three 1-laws are the checkable fragment. |
 | **§2 Indexed / dependent lenses, `R: A^op → Cat`** | `catnn_core::architecture::fibration`. `Fibre` is `R(A)`; `TotalObj` is an object of `∫R`; `reindex` is pullback along an `ArchMorphism`. `reindex_id_is_id` is the identity law of the functor. |
-| **§2 Grothendieck / cartesian fibration** | Same module. Morphisms of `A` are refinements (`Id`, `Fuse`, `Lower`, `Repartition`). |
+| **§2 Grothendieck / cartesian fibration** | Same module. Morphisms of `A` are refinements (`Id`, `Fuse`, `Lower`, `Repartition`, `TightenMemory { region, … }`). `TightenMemory` is indexed by the **region** of the memory object of `H`. |
 | **§3 AISys objects = interfaces** | `catnn_core::category::Interface` — finite products of named `TensorType`s. |
 | **§3 1-morphisms = open components** | `Hom` / `OpenComponent`. Sequential composition is `Tens::compose` (type-checked); parallel is `Tens::tensor`. |
-| **§3 2-morphisms = refinements** | `TwoCell` + `Rewrite` (`Fuse`, `Lower`, `Reassign`, `Partition`, `Refl`) carrying an `EquivWitness` (absolute tolerance, seeds). Verified by running CPU vs reference. |
+| **§3 2-morphisms = refinements** | `TwoCell` + `Rewrite` (`Fuse`, `Lower`, `Reassign`, `Partition`, `Refl`, `Recompute`, `Offload`, `Shard`, `KernelResidency`, `FuseCode`) carrying an `EquivWitness`. Staging (store vs rematerialize, resident vs reload) is a 2-cell. |
 | **§3 3-morphisms / ∞-coherence** | **Not implemented.** Equality of 2-cells is not a mapping space. Documented gap. |
 | **§4 Open dynamical systems** | `OpenComponent { state, input, output, op, moore }`. Neural layers are Mealy (`readout` sees `U`); Moore is the flag. Sequential composition is `then` (state becomes `S⊗S'`). |
 | **§4 Wiring diagrams / structured cospans** | `StructuredCospan`: `left → apex ← right`. `compose` is a port-identifying pushout of apex graphs. |
 | **§5 Time site, `Run: T^op → Set`** | `catnn_rt::sheaf::{Interval, LocalSection}`. `restrict` is the restriction map. |
 | **§5 Descent / gluing** | `glue` + `compatible`. Overlaps with disagreeing checksums become `DescentIssue`s on `GlobalHistory`. |
 | **§6 `H` = hardware category** | `Cluster`, `Node`, `Device`, `Link`. Transfer cost is `latency + bytes/bandwidth`. |
+| **§6 Memory object of `H`** | `DeviceMemory` / `MemoryHierarchy`: per-device **code**, **buffer**, **scratch** regions (capacity + bandwidth + provenance) plus host/NVMe/remote tiers. This spec **indexes** `R`. CLI `--mem code=…,buffer=…,scratch=…` or TOML `[memory.regions.*]`. |
+| **Kernels as staged resources** | `KernelResource`: code size (measured or **estimate**), registers, static/dynamic SMEM, launch geometry, read/write/temp buffers. Load/evict sit on the same timeline as buffer alloc. |
+| **Para(Lens) adjoints** | `catnn_core::lens::para::ParaMorphism`. `get` is the forward 1-morphism; `put` maps output cotangents to `(dP, dX)`. Sequential composition is the chain rule (Cruttwell et al.). |
+| **Optimizer lens / optic** | `Sgd` is a lens `P × dP → P` (PutGet fails). `Adam` is an optic with residual `(m, v, t)`. |
+| **Unified schedule** | `catnn_compile::schedule`: one timeline of kernel load/evict/launch, buffer alloc/free (first-fit arena, aliased lifetimes), transfer, recompute. Peak per region is simulated. `fastest_under(M)` and `min_region(kind)` are the per-region queries. Infeasibility **names the overflowing region**. |
 | **§6 Runtime graph = diagram in AISys** | `IrGraph` (the compile image of the architecture) plus `Realization.placement`. |
 | **§7 Architecture ↔ runtime as a lens** | Compile is `catnn_compile::compile : A → R`. Observe is `RunResult.observation`. **Update is not a lens.** |
 | **§7 Unlawful optic with residual** | `catnn_core::lens::optic::{Optic, PolicyState, UnlawfulWitness}`. The optimizer is this optic; `UnlawfulWitness` names the failed law (`PutGet`). |
@@ -139,8 +147,8 @@ Honest list, not a roadmap disguised as completeness:
   the stock `transformer_block` example is the sequential backbone
   (attention → LN → FFN → LN). Skip-add wiring is in the IR op and cospan
   language; the example does not insert it automatically.
-- **Training / gradients** are not implemented. Update maps on open systems
-  are identity-on-weights (inference).
+- **Training executes on CPU** for MLP and tiny Mixtral. Full-size Mixtral
+  training is *planned* (Spark sweep + simulated timeline), not materialized.
 - **Only `f32` executes.** Other dtypes exist so the SMC can reject them.
 - **No wgpu / CUDA / Metal dispatch.** WGSL is real source and is validated;
   it is not launched.
@@ -162,7 +170,62 @@ Honest list, not a roadmap disguised as completeness:
 - `catnn-core::spec::mixtral` — HF 8x7B / 8x22B param counts; tiny architecture type-check.
 - `catnn-core::lens::moe` — expert coproduct injections; router is an unlawful optic.
 - `catnn-compile::kernel::moe` — scaled-down Mixtral CPU vs independent naïve reference.
+- `catnn-compile::kernel::adjoint` — finite-difference checks on linear / RMSNorm / GELU.
+- `catnn-compile::schedule` — arena aliasing, peak ≤ cap, tight code → reloads, overflow names the region.
+- `catnn-compile::train` — MLP/tiny Mixtral loss decreases; constrained = unconstrained; per-region shrink.
 - `catnn-compile::spark_place` — 8x22B BF16 on 1 Spark is infeasible; 8x7B FP4 fits.
+- `catnn-compile::spark_train` — 8x7B train on N=1 is OOM; tiny train plan fits.
+
+## Memory spec
+
+The compile-time object of `H` is a **structured** budget, not a single byte count.
+
+CLI (either flag):
+
+```
+--mem 64GiB
+--mem code=4MiB,buffer=64GiB,scratch=128KiB
+--mem-per-device code=4MiB,buffer=64GiB,scratch=128KiB
+```
+
+TOML (`examples/cluster.toml`):
+
+```toml
+[memory.regions.code]
+kind = "code"
+bytes = 16777216
+bandwidth_bps = 5.0e10
+latency_s = 5.0e-9
+provenance = "assumption: 16 MiB resident .text"
+
+[memory.regions.buffer]
+# …
+
+[memory.regions.scratch]
+# …
+```
+
+| Region | DGX Spark / GB10 | Provenance |
+|---|---|---|
+| buffer | 128 GiB unified LPDDR5x @ 273 GB/s | **cited** NVIDIA DGX Spark product page |
+| code | 64 MiB resident module/cubin working set | **assumption** — GB10 I-cache / cubin residency unpublished |
+| scratch | 228 KiB SMEM/block | **assumption** — B200 public SMEM figure; GB10 unpublished |
+
+Usable *buffer* on a Spark plan is 128 − 20 (OS) − 4 (workspace) = **104 GiB**. Host aliases device, so offload is NVMe (1 TiB @ 3.5 GB/s, assumed).
+
+Queries: `fastest_under(M)` for a structured `M`; `min_region(code\|buffer\|scratch)` for the smallest cap in one dimension that still schedules. A failed schedule names the overflowing region (e.g. *code region overflow — too many distinct kernel modules resident*).
+
+## Training
+
+Adjoints are `Para(Lens)` 1-morphisms. The Mixtral router uses a straight-through estimator: stop-grad on the discrete top-k index, softmax weights remain differentiable. SGD is a lens (`p − lr·g`; PutGet fails). Adam is an optic with residual `(m, v, t)`.
+
+```bash
+cargo run -p catnn-cli -- train mlp --steps 12 --opt sgd --lr 0.05
+cargo run -p catnn-cli -- train mixtral-tiny --steps 4 --opt sgd --mem-per-device 256KiB
+cargo run -p catnn-cli -- mixtral-train-sweep --seq 2048 --global-batch 8
+```
+
+The constrained (checkpointed) tiny Mixtral schedule executes on CPU and matches unconstrained params to `< 2e-4`. Full-size 8x7B / 8x22B training is the Spark *plan* (ZeRO, 1F1B, simulated code/buffer/scratch peaks), not a materialized step.
 
 ## Mixtral and DGX Spark
 
@@ -194,7 +257,7 @@ cargo run -p catnn-cli -- mixtral-sweep
 
 NVIDIA product page: GB10 Grace Blackwell, **128 GB** unified LPDDR5x, **273 GB/s**, ConnectX-7 **200 Gb/s**, up to **1 PFLOP FP4**, 20-core Arm. Compute capability **12.1 / `sm_121`** (not datacenter `sm_100`). Official Cluster Assistant: **2–4** Sparks (direct 2–3, switch 2–4). N=8 is accepted as a manual topology and flagged unsupported.
 
-Placement uses 20 GiB OS + 4 GiB workspace reserve (usable **104 GiB**). Expert GEMMs are sharded by **EP × TP × PP**; attention is TP×PP only (replicated across EP); embeddings/norms/router are the replica slack. Search enumerates every `EP*TP*PP=N` factorization that fits and keeps the **minimum decode-step** plan (within 10%, higher EP wins because Mixtral is top-2). Decode time is per-node HBM at 273 GB/s plus EP all-to-all, two TP ring all-reduces per layer, and PP P2P over ConnectX-7 200 Gb/s — not `N×` the single-node rate for free. CUDA kernels are emitted for `sm_121`; `nvcc` is used if present, otherwise generation-only.
+Placement uses 20 GiB OS + 4 GiB workspace reserve (usable **104 GiB** buffer). Each Spark device also has a **code** region (64 MiB resident modules, **assumption** — GB10 I-cache unpublished) and a **scratch** region (228 KiB SMEM/block from B200 public figures, **assumption** for GB10). Expert GEMMs are sharded by **EP × TP × PP**; attention is TP×PP only (replicated across EP). Search enumerates every `EP*TP*PP=N` factorization that fits and keeps the **minimum decode-step** plan (within 10%, higher EP wins). Decode time is per-node HBM at 273 GB/s plus EP all-to-all, two TP ring all-reduces per layer, and PP P2P over ConnectX-7 200 Gb/s. Training adds bf16 grads + fp32 master + Adam state (16 B/param), ZeRO, activation checkpointing, and a simulated code/buffer/scratch timeline. CUDA kernels are emitted for `sm_121`; cubin sizes are **estimates** unless `nvcc` is present.
 
 Full-size weights (~93 GB bf16 for 8x7B) are **not** materialized. Numerical check is the tiny config (same ops, seeded weights) vs an independent naïve reference. Optional `--weights` safetensors path errors clearly if the file is absent — Hugging Face transformers is **not** run in CI.
 

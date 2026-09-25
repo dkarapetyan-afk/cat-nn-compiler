@@ -5,6 +5,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::architecture::memory::{DeviceMemory, MemoryBudget, MemoryHierarchy};
+
 /// Kind of compute device. The runtime has a handler per kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -37,19 +39,34 @@ impl DeviceKind {
 pub struct Device {
     pub id: String,
     pub kind: DeviceKind,
-    /// Device-local memory in bytes.
+    /// Device-local *buffer* memory in bytes (legacy single number).
     pub memory_bytes: u64,
     /// Optional peak GFLOP/s override; default from [`DeviceKind::flop_rate`].
     pub gflops: f64,
+    /// Structured code / buffer / scratch object of `H`.
+    #[serde(default)]
+    pub regions: DeviceMemory,
 }
 
 impl Device {
     pub fn cpu(id: impl Into<String>) -> Self {
-        Self { id: id.into(), kind: DeviceKind::Cpu, memory_bytes: 8 << 30, gflops: 50.0 }
+        Self {
+            id: id.into(),
+            kind: DeviceKind::Cpu,
+            memory_bytes: 8 << 30,
+            gflops: 50.0,
+            regions: DeviceMemory::desktop_cpu(),
+        }
     }
 
     pub fn gpu(id: impl Into<String>) -> Self {
-        Self { id: id.into(), kind: DeviceKind::Gpu, memory_bytes: 8 << 30, gflops: 400.0 }
+        Self {
+            id: id.into(),
+            kind: DeviceKind::Gpu,
+            memory_bytes: 8 << 30,
+            gflops: 400.0,
+            regions: DeviceMemory::desktop_cpu(),
+        }
     }
 }
 
@@ -91,6 +108,13 @@ pub struct Cluster {
     pub name: String,
     pub nodes: Vec<Node>,
     pub links: Vec<Link>,
+    /// Memory object of `H`. Indexes the realization fibration: a smaller
+    /// budget reindexes to more recompute / offload.
+    #[serde(default)]
+    pub memory: MemoryHierarchy,
+    /// Optional compile-time per-device working-set cap.
+    #[serde(default)]
+    pub budget: Option<MemoryBudget>,
 }
 
 impl Cluster {
@@ -117,6 +141,8 @@ impl Cluster {
                     latency_s: 2e-4,
                 },
             ],
+            memory: MemoryHierarchy::desktop_cpu(),
+            budget: None,
         }
     }
 
@@ -125,7 +151,23 @@ impl Cluster {
             name: "local-cpu".into(),
             nodes: vec![Node::new("node0", vec![Device::cpu("node0.cpu")])],
             links: vec![],
+            memory: MemoryHierarchy::desktop_cpu(),
+            budget: None,
         }
+    }
+
+    /// Apply a structured compile budget (CLI `--mem` / `--mem-per-device`).
+    pub fn with_budget(mut self, budget: MemoryBudget) -> Self {
+        self.budget = Some(budget);
+        for n in &mut self.nodes {
+            for d in &mut n.devices {
+                d.memory_bytes = d.memory_bytes.min(budget.per_device());
+                d.regions.apply_budget(&budget);
+            }
+        }
+        self.memory.device.bytes = self.memory.device.bytes.min(budget.per_device());
+        self.memory.regions.apply_budget(&budget);
+        self
     }
 
     pub fn devices(&self) -> impl Iterator<Item = (&Node, &Device)> {

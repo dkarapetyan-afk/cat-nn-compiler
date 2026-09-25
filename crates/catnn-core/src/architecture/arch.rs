@@ -7,6 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::architecture::memory::MemoryRegionKind;
 use crate::category::interface::Interface;
 use crate::category::morphism::Hom;
 use crate::error::{CatError, CatResult};
@@ -73,6 +74,16 @@ pub enum ArchRefinementKind {
     Lower { op: String },
     /// Re-partition / change intended placement hint.
     Repartition { op: String, parts: usize },
+    /// Tighten one region of the memory object of `H`. The fibration is
+    /// indexed by the structured spec: a smaller **code** object reindexes
+    /// to kernel reload / fuse-code 2-cells; a smaller **buffer** object
+    /// reindexes to rematerialize / offload; a smaller **scratch** object
+    /// reindexes to occupancy-reducing fusion.
+    TightenMemory {
+        region: MemoryRegionKind,
+        from_bytes: u64,
+        to_bytes: u64,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -104,6 +115,27 @@ impl ArchMorphism {
             src: src.id.clone(),
             tgt: tgt.id.clone(),
             kind: ArchRefinementKind::Fuse { chain, fused_name },
+        }
+    }
+
+    /// Reindex `R` along a smaller memory object in one region.
+    pub fn tighten_memory(
+        arch: &Architecture,
+        region: MemoryRegionKind,
+        from_bytes: u64,
+        to_bytes: u64,
+    ) -> Self {
+        Self {
+            name: format!(
+                "tighten:{}:{}:{}→{}",
+                arch.id,
+                region.as_str(),
+                from_bytes,
+                to_bytes
+            ),
+            src: arch.id.clone(),
+            tgt: arch.id.clone(),
+            kind: ArchRefinementKind::TightenMemory { region, from_bytes, to_bytes },
         }
     }
 }

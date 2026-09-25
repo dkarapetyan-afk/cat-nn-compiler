@@ -1,5 +1,42 @@
 name = "demo-mixed"
 
+# Structured memory object of H (optional). Omitted fields use defaults.
+[memory]
+host_aliases_device = false
+
+[memory.regions.code]
+kind = "code"
+bytes = 16777216
+bandwidth_bps = 5.0e10
+latency_s = 5.0e-9
+provenance = "assumption: 16 MiB resident .text"
+
+[memory.regions.buffer]
+kind = "buffer"
+bytes = 8589934592
+bandwidth_bps = 5.0e10
+latency_s = 1.0e-7
+provenance = "assumption: 8 GiB heap"
+
+[memory.regions.scratch]
+kind = "scratch"
+bytes = 1048576
+bandwidth_bps = 2.0e11
+latency_s = 1.0e-9
+provenance = "assumption: 1 MiB stack + SIMD regs"
+
+[memory.device]
+kind = "device"
+bytes = 8589934592
+bandwidth_bps = 5.0e10
+latency_s = 1.0e-7
+
+[memory.host]
+kind = "host"
+bytes = 17179869184
+bandwidth_bps = 2.5e10
+latency_s = 2.0e-7
+
 [[nodes]]
 id = "node0"
 

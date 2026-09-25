@@ -11,15 +11,17 @@ pub mod spec;
 pub mod tensor;
 
 pub use architecture::{
-    enumerate_realizations, reindex, spark_cluster, ArchMorphism, Architecture, Cluster, Device,
-    DeviceKind, DgxSparkSpec, Fibre, KernelBackend, Placement, Precision, Realization,
+    enumerate_realizations, parse_bytes, reindex, spark_cluster, ArchMorphism, Architecture,
+    Cluster, Device, DeviceKind, DeviceMemory, DgxSparkSpec, Fibre, KernelBackend, MemoryBudget,
+    MemoryHierarchy, MemoryKind, MemoryRegionKind, Placement, Precision, Realization, RegionPeaks,
     SparkTopology,
 };
 pub use category::{flatten_seq, EquivWitness, Hom, Interface, OpenOp, Rewrite, Tens, TwoCell};
 pub use error::{CatError, CatResult};
 pub use lens::{
-    first_of_pair, CompositeSystem, LawfulLens, Observation, OpenComponent, Optic, PolicyState,
-    StructuredCospan, UnlawfulWitness,
+    first_of_pair, Adam, AdamState, CompositeSystem, Cotangent, LawfulLens, Observation,
+    OpenComponent, Optic, OptimizerKind, ParaMorphism, PolicyState, Sgd, StructuredCospan,
+    UnlawfulWitness,
 };
 pub use spec::{
     mixtral_architecture, mlp_spec, transformer_block_spec, MixtralConfig, NetworkBuilder,

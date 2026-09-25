@@ -1,9 +1,11 @@
 //! Kernel backends: executable CPU, generated+validated WGSL, naive reference.
 
+pub mod adjoint;
 pub mod cpu;
 pub mod cuda;
 pub mod moe;
 pub mod reference;
+pub mod resource;
 pub mod wgsl;
 
 use catnn_core::category::OpenOp;
