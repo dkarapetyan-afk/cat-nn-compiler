@@ -692,7 +692,17 @@ pub fn mixtral_layer_timeline_excerpt() -> CatResult<String> {
         s.kernel_reloads,
         s.feasible
     ));
-    out.push_str("measured vs estimated: CUDA cubin sizes are estimates (nvcc not run).\n");
+    let kernels = kernel_resources_for_mixtral();
+    let measured: u64 = kernels.iter().filter(|k| !k.code_estimated).map(|k| k.code_bytes).sum();
+    let estimated: u64 = kernels.iter().filter(|k| k.code_estimated).map(|k| k.code_bytes).sum();
+    let n_m = kernels.iter().filter(|k| !k.code_estimated).count();
+    let n_e = kernels.iter().filter(|k| k.code_estimated).count();
+    out.push_str(&format!(
+        "measured vs estimated: {n_m} kernels measured ({:.1} KiB), {n_e} estimated ({:.1} KiB). {}\n",
+        measured as f64 / 1024.0,
+        estimated as f64 / 1024.0,
+        crate::kernel::measure::MEASURE_ARCH_NOTE
+    ));
     Ok(out)
 }
 
