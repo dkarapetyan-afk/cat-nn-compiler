@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use anyhow::{bail, Context, Result};
 use catnn_compile::kernel::moe::{self, MixtralWeights};
-use catnn_compile::spark_place::{self, format_table};
+use catnn_compile::spark_place::{self, format_rationales, format_table};
 use catnn_compile::{compile, Compiled};
 use catnn_core::architecture::{spark_cluster, Cluster, Precision, SparkTopology};
 use catnn_core::spec::{
@@ -149,6 +149,7 @@ fn cmd_compile(spec: &str, cluster: &str, output: Option<&PathBuf>) -> Result<()
         let plan = spark_place::plan_mixtral(&cfg, n.max(1), Precision::Bf16, topo, 4096, 1)?;
         println!("spark plan: {}", plan.reason);
         println!("  EP/TP/PP = {}/{}/{}", plan.ep, plan.tp, plan.pp);
+        println!("  why: {}", plan.pick_rationale);
         println!("  {}", plan.placement_summary);
         println!("  CUDA sm_121 kernels: {} ({})", plan.cuda.len(), plan.nvcc_note);
         if !plan.feasible {
@@ -224,6 +225,8 @@ fn cmd_mixtral_sweep(
     println!("Usable memory = 128 − 20 (OS) − 4 (workspace) GiB. context={context} batch={batch}.");
     println!();
     print!("{}", format_table(&rows));
+    println!();
+    print!("{}", format_rationales(&rows));
     println!();
     if let Some(p) = rows.first() {
         println!("tok/s assumptions: {}", p.tok_s_assumptions);

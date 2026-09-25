@@ -194,7 +194,7 @@ cargo run -p catnn-cli -- mixtral-sweep
 
 NVIDIA product page: GB10 Grace Blackwell, **128 GB** unified LPDDR5x, **273 GB/s**, ConnectX-7 **200 Gb/s**, up to **1 PFLOP FP4**, 20-core Arm. Compute capability **12.1 / `sm_121`** (not datacenter `sm_100`). Official Cluster Assistant: **2–4** Sparks (direct 2–3, switch 2–4). N=8 is accepted as a manual topology and flagged unsupported.
 
-Placement uses 20 GiB OS + 4 GiB workspace reserve (usable **104 GiB**). Feasibility is a real memory check, not a stub. CUDA kernels are emitted for `sm_121`; `nvcc` is used if present, otherwise generation-only.
+Placement uses 20 GiB OS + 4 GiB workspace reserve (usable **104 GiB**). Expert GEMMs are sharded by **EP × TP × PP**; attention is TP×PP only (replicated across EP); embeddings/norms/router are the replica slack. Search enumerates every `EP*TP*PP=N` factorization that fits and keeps the **minimum decode-step** plan (within 10%, higher EP wins because Mixtral is top-2). Decode time is per-node HBM at 273 GB/s plus EP all-to-all, two TP ring all-reduces per layer, and PP P2P over ConnectX-7 200 Gb/s — not `N×` the single-node rate for free. CUDA kernels are emitted for `sm_121`; `nvcc` is used if present, otherwise generation-only.
 
 Full-size weights (~93 GB bf16 for 8x7B) are **not** materialized. Numerical check is the tiny config (same ops, seeded weights) vs an independent naïve reference. Optional `--weights` safetensors path errors clearly if the file is absent — Hugging Face transformers is **not** run in CI.
 
