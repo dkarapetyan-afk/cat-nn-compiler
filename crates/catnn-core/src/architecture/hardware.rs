@@ -100,10 +100,7 @@ impl Cluster {
         Self {
             name: "demo-mixed".into(),
             nodes: vec![
-                Node::new(
-                    "node0",
-                    vec![Device::cpu("node0.cpu"), Device::gpu("node0.gpu")],
-                ),
+                Node::new("node0", vec![Device::cpu("node0.cpu"), Device::gpu("node0.gpu")]),
                 Node::new("node1", vec![Device::cpu("node1.cpu")]),
             ],
             links: vec![

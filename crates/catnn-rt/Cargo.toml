@@ -15,3 +15,4 @@ indexmap.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
+tempfile = "=3.14.0"

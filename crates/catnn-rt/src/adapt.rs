@@ -28,69 +28,73 @@ pub struct AdaptStep {
 }
 
 pub fn adapt_optic() -> Optic<Compiled, Observation, PolicyState> {
-    Optic::new("adapt_optic", |compiled, _p| {
-        Observation {
+    Optic::new(
+        "adapt_optic",
+        |compiled, _p| Observation {
             latency_ms: 0.0,
             bytes_moved: 0,
             kernel_count: compiled.graph.nodes.len(),
             device_occupancy: vec![],
             max_abs_error: 0.0,
             notes: vec!["view-only; run to observe".into()],
-        }
-    }, |compiled, obs, policy| {
-        let mut next = compiled.clone();
-        let mut p = policy.clone();
-        p.step += 1;
-        p.last_latency_ms = obs.latency_ms;
-        p.last_max_abs = obs.max_abs_error;
-        p.residual_note = format!(
-            "step {}: last latency {:.3}ms; PutGet does not hold",
-            p.step, obs.latency_ms
-        );
+        },
+        |compiled, obs, policy| {
+            let mut next = compiled.clone();
+            let mut p = policy.clone();
+            p.step += 1;
+            p.last_latency_ms = obs.latency_ms;
+            p.last_max_abs = obs.max_abs_error;
+            p.residual_note = format!(
+                "step {}: last latency {:.3}ms; PutGet does not hold",
+                p.step, obs.latency_ms
+            );
 
-        // 1. Fuse linear+relu when they share a device.
-        let fusions = propose_fusions(&next.graph, &next.realization.placement);
-        if !fusions.is_empty() && next.realization.fusions.is_empty() {
-            next.realization.fusions = fusions;
-        }
+            // 1. Fuse linear+relu when they share a device.
+            let fusions = propose_fusions(&next.graph, &next.realization.placement);
+            if !fusions.is_empty() && next.realization.fusions.is_empty() {
+                next.realization.fusions = fusions;
+            }
 
-        // 2. Move the last compute-heavy op onto the fastest device if that
-        //    reduces the estimated cost.
-        if let Some((_, fastest)) = next
-            .cluster
-            .devices()
-            .max_by(|a, b| a.1.gflops.partial_cmp(&b.1.gflops).unwrap())
-        {
-            let heavy = next
-                .graph
-                .nodes
-                .values()
-                .rev()
-                .find(|n| matches!(n.op, catnn_core::category::OpenOp::Linear { .. }
-                    | catnn_core::category::OpenOp::Attention { .. }))
-                .map(|n| n.name.clone());
-            if let Some(op) = heavy {
-                let before = estimate(&next.graph, &next.realization.placement, &next.cluster);
-                let old = next.realization.device_of(&op).unwrap_or("").to_string();
-                next.realization.placement.put(&op, &fastest.id);
-                let after = estimate(&next.graph, &next.realization.placement, &next.cluster);
-                if after.total() * p.replace_threshold >= before.total() {
-                    // Revert if not enough estimated gain.
-                    next.realization.placement.put(&op, old);
-                } else if fastest.kind == DeviceKind::Gpu {
-                    if let Some(k) = next.realization.kernels.iter_mut().find(|k| k.op == op) {
-                        k.backend = KernelBackend::Wgsl;
-                    } else {
-                        next.realization.kernels.push(KernelChoice {
-                            op,
-                            backend: KernelBackend::Wgsl,
-                        });
+            // 2. Move the last compute-heavy op onto the fastest device if that
+            //    reduces the estimated cost.
+            if let Some((_, fastest)) =
+                next.cluster.devices().max_by(|a, b| a.1.gflops.partial_cmp(&b.1.gflops).unwrap())
+            {
+                let heavy = next
+                    .graph
+                    .nodes
+                    .values()
+                    .rev()
+                    .find(|n| {
+                        matches!(
+                            n.op,
+                            catnn_core::category::OpenOp::Linear { .. }
+                                | catnn_core::category::OpenOp::Attention { .. }
+                        )
+                    })
+                    .map(|n| n.name.clone());
+                if let Some(op) = heavy {
+                    let before = estimate(&next.graph, &next.realization.placement, &next.cluster);
+                    let old = next.realization.device_of(&op).unwrap_or("").to_string();
+                    next.realization.placement.put(&op, &fastest.id);
+                    let after = estimate(&next.graph, &next.realization.placement, &next.cluster);
+                    if after.total() * p.replace_threshold >= before.total() {
+                        // Revert if not enough estimated gain.
+                        next.realization.placement.put(&op, old);
+                    } else if fastest.kind == DeviceKind::Gpu {
+                        if let Some(k) = next.realization.kernels.iter_mut().find(|k| k.op == op) {
+                            k.backend = KernelBackend::Wgsl;
+                        } else {
+                            next.realization
+                                .kernels
+                                .push(KernelChoice { op, backend: KernelBackend::Wgsl });
+                        }
                     }
                 }
             }
-        }
-        (next, p)
-    })
+            (next, p)
+        },
+    )
 }
 
 /// Compile → run → observe → update, once. Returns the new compiled
@@ -116,12 +120,7 @@ pub fn adapt_once(
         target_name: next.realization.id.clone(),
         rewrite: if next.realization.fusions.len() > compiled.realization.fusions.len() {
             Rewrite::Fuse {
-                ops: next
-                    .realization
-                    .fusions
-                    .first()
-                    .map(|g| g.ops.clone())
-                    .unwrap_or_default(),
+                ops: next.realization.fusions.first().map(|g| g.ops.clone()).unwrap_or_default(),
             }
         } else {
             Rewrite::Reassign {

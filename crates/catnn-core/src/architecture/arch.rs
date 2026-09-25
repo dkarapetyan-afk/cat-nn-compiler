@@ -85,7 +85,12 @@ impl ArchMorphism {
         }
     }
 
-    pub fn fuse(src: &Architecture, tgt: &Architecture, chain: Vec<String>, fused_name: String) -> Self {
+    pub fn fuse(
+        src: &Architecture,
+        tgt: &Architecture,
+        chain: Vec<String>,
+        fused_name: String,
+    ) -> Self {
         Self {
             name: format!("fuse:{}→{}", src.id, tgt.id),
             src: src.id.clone(),

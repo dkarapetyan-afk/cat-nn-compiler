@@ -36,25 +36,24 @@ pub fn softmax_last(x: &Tensor) -> CatResult<Tensor> {
     let last = *dims.last().unwrap();
     let rows = x.data.len() / last;
     let mut y = x.clone();
-    y.data.par_chunks_mut(last).zip(x.data.par_chunks(last)).take(rows).for_each(
-        |(out, inp)| {
-            let max = inp.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-            let mut sum = 0.0f32;
-            for (o, i) in out.iter_mut().zip(inp.iter()) {
-                *o = (i - max).exp();
-                sum += *o;
-            }
-            let inv = 1.0 / sum.max(1e-30);
-            for o in out.iter_mut() {
-                *o *= inv;
-            }
-        },
-    );
+    y.data.par_chunks_mut(last).zip(x.data.par_chunks(last)).take(rows).for_each(|(out, inp)| {
+        let max = inp.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        let mut sum = 0.0f32;
+        for (o, i) in out.iter_mut().zip(inp.iter()) {
+            *o = (i - max).exp();
+            sum += *o;
+        }
+        let inv = 1.0 / sum.max(1e-30);
+        for o in out.iter_mut() {
+            *o *= inv;
+        }
+    });
     Ok(y)
 }
 
 pub fn layer_norm(x: &Tensor, gamma: &Tensor, beta: &Tensor, eps: f32) -> CatResult<Tensor> {
-    let last = *x.ty.shape.dims.last().ok_or_else(|| CatError::ShapeMismatch("ln scalar".into()))?;
+    let last =
+        *x.ty.shape.dims.last().ok_or_else(|| CatError::ShapeMismatch("ln scalar".into()))?;
     if gamma.data.len() != last || beta.data.len() != last {
         return Err(CatError::ShapeMismatch("ln gamma/beta length".into()));
     }
@@ -62,10 +61,13 @@ pub fn layer_norm(x: &Tensor, gamma: &Tensor, beta: &Tensor, eps: f32) -> CatRes
     y.data.par_chunks_mut(last).zip(x.data.par_chunks(last)).for_each(|(out, inp)| {
         let n = last as f32;
         let mean = inp.iter().sum::<f32>() / n;
-        let var = inp.iter().map(|v| {
-            let d = v - mean;
-            d * d
-        }).sum::<f32>()
+        let var = inp
+            .iter()
+            .map(|v| {
+                let d = v - mean;
+                d * d
+            })
+            .sum::<f32>()
             / n;
         let inv = 1.0 / (var + eps).sqrt();
         for i in 0..last {
@@ -142,8 +144,8 @@ pub fn matmul_mk_kn(a: &[f32], b: &[f32], c: &mut [f32], m: usize, k: usize, n: 
         let ai = &a[i * k..(i + 1) * k];
         for j0 in (0..n).step_by(BN) {
             let j1 = (j0 + BN).min(n);
-            for j in j0..j1 {
-                row[j] = dot_row(ai, b, k, n, j);
+            for (j, slot) in row.iter_mut().enumerate().take(j1).skip(j0) {
+                *slot = dot_row(ai, b, k, n, j);
             }
         }
     });
@@ -251,10 +253,7 @@ pub fn attention(
 }
 
 fn linear3(x: &Tensor, w: &Tensor, b: usize, s: usize, d: usize) -> CatResult<Tensor> {
-    let flat = Tensor::from_vec(
-        catnn_core::tensor::TensorType::f32([b * s, d]),
-        x.data.clone(),
-    )?;
+    let flat = Tensor::from_vec(catnn_core::tensor::TensorType::f32([b * s, d]), x.data.clone())?;
     let y = linear(&flat, w, None)?;
     Tensor::from_vec(catnn_core::tensor::TensorType::f32([b, s, d]), y.data)
 }

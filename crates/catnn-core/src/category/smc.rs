@@ -28,11 +28,20 @@ impl Tens {
     }
 
     /// Sequential composition `g ∘ f` (apply `f` then `g`).
+    ///
+    /// The category is *strict on units*: `id ∘ f = f` and `f ∘ id = f`
+    /// as values, so the unit laws hold on the nose (not only up to a 2-cell).
     pub fn compose(f: &Hom, g: &Hom) -> CatResult<Hom> {
         f.cod.same_as(&g.dom).map_err(|_| CatError::InterfaceMismatch {
             expected: f.cod.to_string(),
             actual: g.dom.to_string(),
         })?;
+        if matches!(f.body, HomBody::Id) {
+            return Ok(g.clone());
+        }
+        if matches!(g.body, HomBody::Id) {
+            return Ok(f.clone());
+        }
         Ok(Hom {
             name: format!("({}∘{})", g.name, f.name),
             dom: f.dom.clone(),
@@ -100,9 +109,8 @@ impl Tens {
     /// Fold a list with `compose`. Empty list is not an identity (no object).
     pub fn compose_all(homs: &[Hom]) -> CatResult<Hom> {
         let mut iter = homs.iter();
-        let first = iter
-            .next()
-            .ok_or_else(|| CatError::Wiring("compose_all on empty list".into()))?;
+        let first =
+            iter.next().ok_or_else(|| CatError::Wiring("compose_all on empty list".into()))?;
         let mut acc = first.clone();
         for h in iter {
             acc = Self::compose(&acc, h)?;

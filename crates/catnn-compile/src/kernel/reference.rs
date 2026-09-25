@@ -49,8 +49,8 @@ pub fn layer_norm(x: &Tensor, gamma: &Tensor, beta: &Tensor, eps: f32) -> CatRes
         let mean = row.iter().sum::<f32>() / n;
         let var = row.iter().map(|v| (v - mean) * (v - mean)).sum::<f32>() / n;
         let inv = 1.0 / (var + eps).sqrt();
-        for i in 0..last {
-            row[i] = (row[i] - mean) * inv * gamma.data[i] + beta.data[i];
+        for (i, val) in row.iter_mut().enumerate() {
+            *val = (*val - mean) * inv * gamma.data[i] + beta.data[i];
         }
     }
     Ok(y)

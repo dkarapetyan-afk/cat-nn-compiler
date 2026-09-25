@@ -4,13 +4,13 @@ use std::fs;
 use std::path::PathBuf;
 
 use anyhow::{bail, Context, Result};
-use clap::{Parser, Subcommand};
 use catnn_compile::{compile, Compiled};
 use catnn_core::architecture::Cluster;
 use catnn_core::spec::{mlp_spec, parse_auto, transformer_block_spec, NetworkSpec};
 use catnn_core::tensor::Tensor;
 use catnn_core::Architecture;
 use catnn_rt::execute;
+use clap::{Parser, Subcommand};
 
 #[derive(Parser, Debug)]
 #[command(name = "catnn", about = "Categorical compiler for neural networks")]
@@ -157,10 +157,7 @@ fn cmd_run(spec: &str, cluster: &str, adapt: bool, seed: u64) -> Result<()> {
         println!("  optic is unlawful ({})", step.unlawful.law_that_fails);
         println!("  policy.step: {}", step.policy.step);
         println!("  residual: {}", step.policy.residual_note);
-        println!(
-            "  latency {:.3}ms → {:.3}ms",
-            step.before.latency_ms, step.after.latency_ms
-        );
+        println!("  latency {:.3}ms → {:.3}ms", step.before.latency_ms, step.after.latency_ms);
     }
     if report.observation.max_abs_error > 1e-3 {
         bail!("numerical check failed");
@@ -177,14 +174,7 @@ fn cmd_inspect(spec: &str, cluster: &str) -> Result<()> {
     println!("state:  {}", arch.system.state);
     println!("components (1-morphisms):");
     for c in arch.components() {
-        println!(
-            "  {}: {}  {} → {}  (state {})",
-            c.name,
-            c.op.name(),
-            c.input,
-            c.output,
-            c.state
-        );
+        println!("  {}: {}  {} → {}  (state {})", c.name, c.op.name(), c.input, c.output, c.state);
     }
     println!("hom tree: {}", arch.hom.name);
     let fibre = catnn_core::enumerate_realizations(&arch, &cluster);

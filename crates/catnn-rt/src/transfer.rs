@@ -41,9 +41,10 @@ impl ChannelFabric {
     }
 
     pub fn send(&self, msg: TransferMsg) -> CatResult<()> {
-        let tx = self.txs.get(&msg.dst_device).ok_or_else(|| {
-            CatError::Io(format!("no inbox for {}", msg.dst_device))
-        })?;
+        let tx = self
+            .txs
+            .get(&msg.dst_device)
+            .ok_or_else(|| CatError::Io(format!("no inbox for {}", msg.dst_device)))?;
         tx.send(msg).map_err(|e| CatError::Io(e.to_string()))
     }
 
@@ -68,9 +69,7 @@ pub fn spawn_tcp_node(bind: &str) -> CatResult<(u16, thread::JoinHandle<()>, Sen
 
 pub fn send_tcp(addr: &str, msg: &TransferMsg) -> CatResult<()> {
     let mut stream = TcpStream::connect(addr).map_err(|e| CatError::Io(e.to_string()))?;
-    stream
-        .set_write_timeout(Some(Duration::from_secs(2)))
-        .ok();
+    stream.set_write_timeout(Some(Duration::from_secs(2))).ok();
     write_msg(&mut stream, msg)
 }
 

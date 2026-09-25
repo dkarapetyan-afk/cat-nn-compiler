@@ -97,11 +97,7 @@ pub struct PairState {
 }
 
 pub fn first_of_pair() -> LawfulLens<PairState, f64> {
-    LawfulLens::new(
-        "first_of_pair",
-        |s| s.first,
-        |s, v| PairState { first: *v, second: s.second },
-    )
+    LawfulLens::new("first_of_pair", |s| s.first, |s, v| PairState { first: *v, second: s.second })
 }
 
 pub fn identity_f64() -> LawfulLens<f64, f64> {

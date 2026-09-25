@@ -25,12 +25,7 @@ pub struct NetworkSpec {
 
 impl Default for NetworkSpec {
     fn default() -> Self {
-        Self {
-            name: "net".into(),
-            batch: 1,
-            layers: vec![],
-            compose: ComposeStyle::Sequential,
-        }
+        Self { name: "net".into(), batch: 1, layers: vec![], compose: ComposeStyle::Sequential }
     }
 }
 
@@ -109,20 +104,16 @@ impl NetworkSpec {
 
         for layer in &self.layers {
             let c = match layer {
-                LayerSpec::Linear { name, in_features, out_features, bias } => {
-                    match &current_out {
-                        Some(prev) => OpenComponent::linear_on(
-                            name,
-                            prev.clone(),
-                            *in_features,
-                            *out_features,
-                            *bias,
-                        ),
-                        None => {
-                            OpenComponent::linear(name, batch, *in_features, *out_features, *bias)
-                        }
-                    }
-                }
+                LayerSpec::Linear { name, in_features, out_features, bias } => match &current_out {
+                    Some(prev) => OpenComponent::linear_on(
+                        name,
+                        prev.clone(),
+                        *in_features,
+                        *out_features,
+                        *bias,
+                    )?,
+                    None => OpenComponent::linear(name, batch, *in_features, *out_features, *bias),
+                },
                 LayerSpec::Relu { name } => {
                     let input = current_out.clone().ok_or_else(|| {
                         CatError::Parse(format!("relu {name} has no preceding interface"))

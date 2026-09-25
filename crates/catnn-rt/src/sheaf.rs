@@ -163,10 +163,7 @@ pub fn compatible(a: &LocalSection, b: &LocalSection) -> Result<(), DescentIssue
                     device_a: a.device.clone(),
                     device_b: b.device.clone(),
                     interval: ov,
-                    reason: format!(
-                        "checksum mismatch on {} @ {} ({:?})",
-                        e.op, e.t, e.kind
-                    ),
+                    reason: format!("checksum mismatch on {} @ {} ({:?})", e.op, e.t, e.kind),
                 });
             }
         }
@@ -207,13 +204,7 @@ mod tests {
     use super::*;
 
     fn ev(t: u64, op: &str, dev: &str, sum: u64) -> Event {
-        Event {
-            t,
-            op: op.into(),
-            device: dev.into(),
-            kind: EventKind::KernelEnd,
-            checksum: sum,
-        }
+        Event { t, op: op.into(), device: dev.into(), kind: EventKind::KernelEnd, checksum: sum }
     }
 
     #[test]

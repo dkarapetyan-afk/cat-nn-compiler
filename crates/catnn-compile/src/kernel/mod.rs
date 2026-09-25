@@ -45,15 +45,16 @@ pub fn eval_cpu(node: &IrNode, inputs: &[Tensor]) -> CatResult<Tensor> {
             cpu::linear(x, w, bias)
         }
         OpenOp::LayerNorm { eps_e6 } => {
-            let gamma = node.params.get("gamma").ok_or_else(|| {
-                catnn_core::CatError::UnknownPort {
+            let gamma =
+                node.params.get("gamma").ok_or_else(|| catnn_core::CatError::UnknownPort {
                     interface: node.name.clone(),
                     port: "gamma".into(),
-                }
-            })?;
-            let beta = node.params.get("beta").ok_or_else(|| {
-                catnn_core::CatError::UnknownPort { interface: node.name.clone(), port: "beta".into() }
-            })?;
+                })?;
+            let beta =
+                node.params.get("beta").ok_or_else(|| catnn_core::CatError::UnknownPort {
+                    interface: node.name.clone(),
+                    port: "beta".into(),
+                })?;
             cpu::layer_norm(x, gamma, beta, *eps_e6 as f32 * 1e-6)
         }
         OpenOp::Attention { n_heads, d_head, .. } => {

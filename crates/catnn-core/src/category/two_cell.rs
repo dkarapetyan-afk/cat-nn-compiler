@@ -40,7 +40,13 @@ pub struct EquivWitness {
 
 impl EquivWitness {
     pub fn tight() -> Self {
-        Self { abs_tol: 1e-5, samples: 3, seeds: vec![1, 2, 3], observed_max_abs: None, verified: false }
+        Self {
+            abs_tol: 1e-5,
+            samples: 3,
+            seeds: vec![1, 2, 3],
+            observed_max_abs: None,
+            verified: false,
+        }
     }
 
     pub fn relaxed() -> Self {
@@ -60,10 +66,7 @@ impl EquivWitness {
             Ok(())
         } else {
             self.verified = false;
-            Err(CatError::Witness(format!(
-                "max abs {max_abs} exceeds tolerance {}",
-                self.abs_tol
-            )))
+            Err(CatError::Witness(format!("max abs {max_abs} exceeds tolerance {}", self.abs_tol)))
         }
     }
 }
@@ -138,8 +141,10 @@ impl TwoCell {
                 abs_tol: self.witness.abs_tol.max(other.witness.abs_tol),
                 samples: self.witness.samples.min(other.witness.samples.max(1)),
                 seeds: self.witness.seeds,
-                observed_max_abs: match (self.witness.observed_max_abs, other.witness.observed_max_abs)
-                {
+                observed_max_abs: match (
+                    self.witness.observed_max_abs,
+                    other.witness.observed_max_abs,
+                ) {
                     (Some(a), Some(b)) => Some(a.max(b)),
                     (a, b) => a.or(b),
                 },

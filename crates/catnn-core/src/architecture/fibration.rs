@@ -180,7 +180,7 @@ mod tests {
 
     #[test]
     fn reindex_fuse_expands_chain() {
-        let arch = mlp();
+        let _arch = mlp();
         let cluster = Cluster::single_cpu();
         let mut fused = Realization::new("fused", "mlp-fused", &cluster);
         fused.placement.put("fc1+act", "node0.cpu");

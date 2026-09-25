@@ -8,20 +8,17 @@ pub mod transfer;
 
 pub use adapt::{adapt_once, adapt_optic, AdaptStep};
 pub use scheduler::{run_compiled, run_with_reference, RunResult};
-pub use sheaf::{glue, compatible, Event, EventKind, GlobalHistory, Interval, LocalSection};
+pub use sheaf::{compatible, glue, Event, EventKind, GlobalHistory, Interval, LocalSection};
 
 use catnn_compile::Compiled;
 use catnn_core::tensor::Tensor;
 use catnn_core::CatResult;
 
 /// End-to-end: run + glue + optional one adaptation step.
-pub fn execute(
-    compiled: &Compiled,
-    input: &Tensor,
-    adapt: bool,
-) -> CatResult<ExecuteReport> {
+pub fn execute(compiled: &Compiled, input: &Tensor, adapt: bool) -> CatResult<ExecuteReport> {
     if adapt {
-        let (next, step, run) = adapt_once(compiled, input, &catnn_core::lens::PolicyState::default())?;
+        let (next, step, run) =
+            adapt_once(compiled, input, &catnn_core::lens::PolicyState::default())?;
         Ok(ExecuteReport {
             output: run.output,
             observation: step.after.clone(),

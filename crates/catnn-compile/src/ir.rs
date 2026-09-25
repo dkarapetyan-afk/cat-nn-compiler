@@ -74,12 +74,8 @@ impl IrGraph {
         let mut out = Vec::new();
         while let Some(n) = q.pop() {
             out.push(NodeId(n));
-            let mut nexts: Vec<u32> = self
-                .edges
-                .iter()
-                .filter(|e| e.src.0 == n)
-                .map(|e| e.dst.0)
-                .collect();
+            let mut nexts: Vec<u32> =
+                self.edges.iter().filter(|e| e.src.0 == n).map(|e| e.dst.0).collect();
             nexts.sort_unstable();
             for s in nexts {
                 let d = indeg.get_mut(&s).unwrap();

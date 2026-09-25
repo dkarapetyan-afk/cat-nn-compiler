@@ -31,7 +31,7 @@ impl NetworkBuilder {
     pub fn linear(mut self, name: impl Into<String>, din: usize, dout: usize) -> CatResult<Self> {
         let name = name.into();
         let c = match &self.system {
-            Some(s) => OpenComponent::linear_on(&name, s.output.clone(), din, dout, true),
+            Some(s) => OpenComponent::linear_on(&name, s.output.clone(), din, dout, true)?,
             None => OpenComponent::linear(&name, self.spec.batch.max(1), din, dout, true),
         };
         self.spec.layers.push(LayerSpec::Linear {
@@ -85,11 +85,10 @@ impl NetworkBuilder {
 
     pub fn layer_norm(mut self, name: impl Into<String>, features: usize) -> CatResult<Self> {
         let name = name.into();
-        let input = self
-            .system
-            .as_ref()
-            .map(|s| s.output.clone())
-            .ok_or_else(|| crate::error::CatError::Parse("layernorm with empty prefix".into()))?;
+        let input =
+            self.system.as_ref().map(|s| s.output.clone()).ok_or_else(|| {
+                crate::error::CatError::Parse("layernorm with empty prefix".into())
+            })?;
         let c = OpenComponent::layer_norm(&name, input, features);
         self.spec.layers.push(LayerSpec::LayerNorm { name, features });
         self.push(c)?;
@@ -162,10 +161,7 @@ mod tests {
 
     #[test]
     fn dsl_rejects_bad_linear_chain() {
-        let err = NetworkBuilder::new("bad", 2)
-            .linear("a", 4, 8)
-            .unwrap()
-            .linear("b", 3, 3);
+        let err = NetworkBuilder::new("bad", 2).linear("a", 4, 8).unwrap().linear("b", 3, 3);
         assert!(err.is_err());
     }
 

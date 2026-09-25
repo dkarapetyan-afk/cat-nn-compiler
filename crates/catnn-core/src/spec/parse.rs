@@ -80,9 +80,9 @@ pub fn parse_catnn(src: &str) -> CatResult<NetworkSpec> {
             }
             "relu" => spec.layers.push(LayerSpec::Relu { name: need(toks.next(), "relu name")? }),
             "gelu" => spec.layers.push(LayerSpec::Gelu { name: need(toks.next(), "gelu name")? }),
-            "softmax" => {
-                spec.layers.push(LayerSpec::Softmax { name: need(toks.next(), "softmax name")?, axis: -1 })
-            }
+            "softmax" => spec
+                .layers
+                .push(LayerSpec::Softmax { name: need(toks.next(), "softmax name")?, axis: -1 }),
             "layernorm" => {
                 let name = need(toks.next(), "layernorm name")?;
                 let features = parse_usize(toks.next(), "features")?;
@@ -103,7 +103,9 @@ pub fn parse_catnn(src: &str) -> CatResult<NetworkSpec> {
                     other => return Err(CatError::Parse(format!("unknown compose {other}"))),
                 };
             }
-            other => return Err(CatError::Parse(format!("line {lineno}: unknown keyword {other}"))),
+            other => {
+                return Err(CatError::Parse(format!("line {lineno}: unknown keyword {other}")))
+            }
         }
     }
     if spec.batch == 0 {

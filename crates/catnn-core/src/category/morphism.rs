@@ -53,9 +53,16 @@ impl OpenOp {
 
     /// Infer output tensor type from the primary input (and, for binary ops,
     /// the secondary input). Used by the DSL and the textual parser.
-    pub fn infer_output(&self, input: &TensorType, aux: Option<&TensorType>) -> CatResult<TensorType> {
+    pub fn infer_output(
+        &self,
+        input: &TensorType,
+        aux: Option<&TensorType>,
+    ) -> CatResult<TensorType> {
         match self {
-            OpenOp::Identity | OpenOp::Relu | OpenOp::Gelu | OpenOp::Softmax { .. }
+            OpenOp::Identity
+            | OpenOp::Relu
+            | OpenOp::Gelu
+            | OpenOp::Softmax { .. }
             | OpenOp::LayerNorm { .. } => Ok(input.clone()),
             OpenOp::Linear { out_features, .. } => {
                 let mut dims = input.shape.dims.clone();
@@ -213,5 +220,8 @@ pub fn binary_interface(name: &str, lhs: TensorType, rhs: TensorType) -> Interfa
 
 pub fn f32_activation(name: &str, shape: impl Into<Vec<usize>>) -> (Interface, Interface) {
     let ty = TensorType::new(shape, DType::F32);
-    (Interface::single(format!("{name}.in"), ty.clone()), Interface::single(format!("{name}.out"), ty))
+    (
+        Interface::single(format!("{name}.in"), ty.clone()),
+        Interface::single(format!("{name}.out"), ty),
+    )
 }

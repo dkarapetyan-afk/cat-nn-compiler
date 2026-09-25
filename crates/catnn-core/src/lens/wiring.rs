@@ -159,13 +159,6 @@ mod tests {
 
     #[test]
     fn cospan_compose_glues_on_shared_interface() {
-        let a = OpenComponent::linear("a", 2, 4, 4, false);
-        let b = OpenComponent::relu("b", a.output.clone());
-        let c = OpenComponent::linear("c", 2, 4, 2, false);
-        let left = StructuredCospan::from_chain("L", &[a, b.clone()]).unwrap();
-        let right = StructuredCospan::from_chain("R", &[b, c]).unwrap();
-        // right.left is b.input which equals a.output; left.right is b.output
-        // These may not match — build two non-overlapping chains instead.
         let fc1 = OpenComponent::linear("fc1", 2, 4, 8, true);
         let mid_out = fc1.output.clone();
         let act = OpenComponent::relu("act", mid_out);

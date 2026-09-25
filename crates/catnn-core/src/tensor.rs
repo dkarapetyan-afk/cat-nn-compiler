@@ -123,9 +123,7 @@ impl Shape {
         {
             return Ok(self.clone());
         }
-        Err(CatError::ShapeMismatch(format!(
-            "cannot broadcast {self} + {other}"
-        )))
+        Err(CatError::ShapeMismatch(format!("cannot broadcast {self} + {other}")))
     }
 
     pub fn last_dim(&self) -> CatResult<usize> {
@@ -190,10 +188,7 @@ impl TensorType {
             });
         }
         if self.shape != other.shape {
-            return Err(CatError::ShapeMismatch(format!(
-                "{} vs {}",
-                self.shape, other.shape
-            )));
+            return Err(CatError::ShapeMismatch(format!("{} vs {}", self.shape, other.shape)));
         }
         Ok(())
     }

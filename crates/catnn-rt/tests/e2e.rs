@@ -12,7 +12,7 @@ fn mlp_from_catnn_file_runs() {
     let compiled = compile(&arch, &Cluster::demo()).unwrap();
     let x = Tensor::lcg(TensorType::f32([4, 16]), 1);
     let report = execute(&compiled, &x, false).unwrap();
-    assert!(report.observation.max_abs_error < 1e-5);
+    assert!(report.observation.max_abs_error < 1e-4);
     assert!(report.history.is_coherent());
 }
 

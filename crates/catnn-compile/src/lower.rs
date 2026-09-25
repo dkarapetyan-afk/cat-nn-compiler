@@ -19,13 +19,7 @@ pub fn lower_architecture(arch: &Architecture) -> CatResult<IrGraph> {
     let mut last: Option<NodeId>;
 
     // An explicit input node so the runtime has a place to inject data.
-    let in_ty = arch
-        .input()
-        .ports
-        .values()
-        .next()
-        .cloned()
-        .unwrap_or_else(|| TensorType::f32([1]));
+    let in_ty = arch.input().ports.values().next().cloned().unwrap_or_else(|| TensorType::f32([1]));
     let input_id = NodeId(next_id);
     g.nodes.insert(
         next_id,
@@ -65,13 +59,7 @@ pub fn lower_architecture(arch: &Architecture) -> CatResult<IrGraph> {
 }
 
 fn lower_component(c: &OpenComponent, id: NodeId) -> CatResult<IrNode> {
-    let output_ty = c
-        .output
-        .ports
-        .values()
-        .next()
-        .cloned()
-        .unwrap_or_else(|| TensorType::f32([1]));
+    let output_ty = c.output.ports.values().next().cloned().unwrap_or_else(|| TensorType::f32([1]));
     let mut params = IndexMap::new();
     let seed_base = id.0 as u64 * 1009 + 17;
     for (i, (pname, ty)) in c.state.ports.iter().enumerate() {

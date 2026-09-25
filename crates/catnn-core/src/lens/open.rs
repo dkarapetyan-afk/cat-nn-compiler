@@ -62,11 +62,9 @@ impl OpenComponent {
         bias: bool,
     ) -> Self {
         let name = name.into();
-        let input = Interface::single(
-            format!("{name}.U"),
-            TensorType::f32([batch, in_features]),
-        );
+        let input = Interface::single(format!("{name}.U"), TensorType::f32([batch, in_features]));
         Self::linear_on(name, input, in_features, out_features, bias)
+            .expect("constructed input matches in_features")
     }
 
     /// Linear map on the last axis of an existing interface. Leading
@@ -78,14 +76,16 @@ impl OpenComponent {
         in_features: usize,
         out_features: usize,
         bias: bool,
-    ) -> Self {
+    ) -> CatResult<Self> {
         let name = name.into();
-        let in_ty = input
-            .ports
-            .values()
-            .next()
-            .cloned()
-            .unwrap_or_else(|| TensorType::f32([in_features]));
+        let in_ty =
+            input.ports.values().next().cloned().unwrap_or_else(|| TensorType::f32([in_features]));
+        let last = in_ty.shape.dims.last().copied().unwrap_or(0);
+        if last != in_features {
+            return Err(CatError::ShapeMismatch(format!(
+                "linear {name}: last dim {last} != in_features {in_features}"
+            )));
+        }
         let mut out_dims = in_ty.shape.dims.clone();
         if out_dims.is_empty() {
             out_dims.push(out_features);
@@ -95,7 +95,7 @@ impl OpenComponent {
         let output = Interface::single(format!("{name}.Y"), TensorType::f32(out_dims));
         let op = OpenOp::Linear { in_features, out_features, bias };
         let state = op.state_interface(&name, Some(in_features));
-        Self { name, state, input, output, op, moore: false }
+        Ok(Self { name, state, input, output, op, moore: false })
     }
 
     pub fn relu(name: impl Into<String>, input: Interface) -> Self {
@@ -167,9 +167,8 @@ impl OpenComponent {
 
     pub fn residual_add(name: impl Into<String>, ty: TensorType) -> Self {
         let name = name.into();
-        let input = Interface::new(format!("{name}.U"))
-            .port("skip", ty.clone())
-            .port("branch", ty.clone());
+        let input =
+            Interface::new(format!("{name}.U")).port("skip", ty.clone()).port("branch", ty.clone());
         let output = Interface::single(format!("{name}.Y"), ty);
         Self {
             name: name.clone(),
