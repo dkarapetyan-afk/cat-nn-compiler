@@ -295,7 +295,6 @@ struct DecodeCost {
     pp_s: f64,
     step_s: f64,
     a2a_bytes: u64,
-    active_weight_bytes: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -429,28 +428,34 @@ fn rationale(
     );
 
     if let Some(alt) = runner {
-        let ratio = if alt.dec.step_s > 0.0 { alt.dec.step_s / dec.step_s.max(1e-18) } else { 1.0 };
+        let rel = (alt.dec.step_s - dec.step_s) / dec.step_s.max(1e-18) * 100.0;
         why.push_str(&format!(
-            " Next is EP={} TP={} PP={} at {:.2} ms ({:.2}×).",
+            " Runner-up EP={} TP={} PP={} at {:.2} ms ({:+.0}%).",
             alt.ep,
             alt.tp,
             alt.pp,
             ms(alt.dec.step_s),
-            ratio
+            rel
         ));
         if chosen.tp > 1 && alt.ep > chosen.ep {
             why.push_str(
                 " EP does not cut attention HBM (attn is replicated across expert ranks); \
-                 Mixtral top-2 all-to-all is a 2·k·H activation exchange, while TP=N \
+                 Mixtral top-2 all-to-all is a 2·k·H activation exchange, while more TP \
                  splits every GEMM including experts and only pays two ring all-reduces \
                  of H per layer on 200 Gb/s.",
             );
-        } else if chosen.ep > 1 && alt.tp > chosen.tp {
-            why.push_str(
-                " Top-2 routing makes EP natural: all-to-all of activations beat TP's \
-                 two all-reduces/layer once the 10% EP tie-break applies, or EP's HBM \
-                 (experts/EP, attn replicated) is the latency winner.",
-            );
+        } else if chosen.ep > alt.ep {
+            if alt.dec.step_s + 1e-18 < dec.step_s {
+                why.push_str(
+                    " Mixtral top-2: kept the higher-EP plan within 10% of the latency \
+                     min (expert HBM falls with EP; attention stays replicated).",
+                );
+            } else {
+                why.push_str(
+                    " Mixtral top-2: EP all-to-all plus expert sharding beat more TP \
+                     after adding two ring all-reduces/layer on 200 Gb/s.",
+                );
+            }
         } else if chosen.pp > 1 {
             why.push_str(
                 " PP is sequential at batch-1 decode (no HBM win, plus P2P); chosen \
@@ -464,6 +469,7 @@ fn rationale(
     why
 }
 
+#[allow(clippy::too_many_arguments)]
 fn node_mem(
     cfg: &MixtralConfig,
     prec: Precision,
@@ -578,7 +584,6 @@ fn decode_cost(
         pp_s,
         step_s: step_s.max(1e-12),
         a2a_bytes: a2a_remote,
-        active_weight_bytes: active_bytes,
     })
 }
 
