@@ -405,7 +405,7 @@ fn gqa(
     Arr { dims: vec![b, s, d], data: y.data }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::needless_range_loop)]
 fn gqa_bwd(
     x: &Arr,
     wq: &Arr,
@@ -603,6 +603,7 @@ fn route_idx(x: &Arr, gate: &Arr, top_k: usize) -> Vec<Vec<usize>> {
 /// Frozen-index MoE backward. Returns `(dx, dgate, dexpert_w1)`.
 /// `dx` includes both the expert SwiGLU path and the gate-weight path
 /// (softmax over the held-fixed top-k).
+#[allow(clippy::needless_range_loop)]
 fn moe_bwd_frozen(
     x: &Arr,
     gate: &Arr,
@@ -990,6 +991,7 @@ enum Scalar {
     HiddenSum,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn mixtral_scalar(
     cfg: &MixtralConfig,
     w: &MixtralWeights,
@@ -1091,7 +1093,8 @@ fn mixtral_grad(
     let mut x = embedding(tokens, &table);
     x.dims = vec![batch, seq, h];
     let mut xs = vec![x.clone()];
-    let mut tape: Vec<(Arr, Arr, Arr, Arr, Vec<Vec<usize>>)> = Vec::new();
+    type LayerTape = (Arr, Arr, Arr, Arr, Vec<Vec<usize>>);
+    let mut tape: Vec<LayerTape> = Vec::new();
     for layer in &w.layers {
         let xn = rmsnorm(&x, &t64(&layer.rms_attn), cfg.rms_norm_eps as f64);
         let attn = gqa(

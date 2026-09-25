@@ -152,6 +152,7 @@ fn layer_elems(cfg: &MixtralConfig, ep: usize, tp: usize) -> CatResult<u64> {
 }
 
 /// Bytes that must sit in the **buffer** region after ZeRO and offload.
+#[allow(clippy::too_many_arguments)]
 fn device_buffer_bytes(
     cfg: &MixtralConfig,
     ep: usize,
@@ -389,12 +390,9 @@ fn first_feasible_n(
 ) -> Option<usize> {
     let spec = DgxSparkSpec::official();
     let usable = budget.map(|b| b.per_device()).unwrap_or(spec.usable_bytes());
-    for &cand in &[1usize, 2, 4, 8, 16, 32, 64] {
-        if any_feasible(cfg, cand, mixed_fp8, seq, global_batch, usable) {
-            return Some(cand);
-        }
-    }
-    None
+    [1usize, 2, 4, 8, 16, 32, 64]
+        .into_iter()
+        .find(|&cand| any_feasible(cfg, cand, mixed_fp8, seq, global_batch, usable))
 }
 
 pub fn plan_train(
