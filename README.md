@@ -269,6 +269,21 @@ Placement uses 20 GiB OS + 4 GiB workspace reserve (usable **104 GiB** buffer). 
 
 Full-size weights (~93 GB bf16 for 8x7B) are **not** materialized. Numerical check is the tiny config (same ops, seeded weights) vs an independent naïve reference. Optional `--weights` safetensors path errors clearly if the file is absent — Hugging Face transformers is **not** run in CI.
 
+## DeepSeek-V3 composites
+
+DeepSeek-V3 is the same kind of diagram: embed, then MLA and either a dense SwiGLU or a sigmoid-routed MoE with a shared expert, then the LM head. A second copy is not a new runtime.
+
+- `deepseek-connected` sequences two hidden trunks (`Architecture::connect`). Two full models do not chain, because logits are not tokens.
+- `deepseek-mixture` runs two full models on the same tokens and mixes the logits (`Architecture::mixture`). The schedule's buffer is larger than one model.
+
+```bash
+cargo run -p catnn-cli -- compile deepseek-mixture --cluster demo
+cargo run -p catnn-cli -- compile deepseek-connected --cluster cpu
+cargo run -p catnn-cli -- compile deepseek-v3 --cluster demo
+```
+
+`deepseek-v3` is the public 671B-class config with weights left unmaterialized. The tiny composites execute on CPU.
+
 ## License
 
 MIT

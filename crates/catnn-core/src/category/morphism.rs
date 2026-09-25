@@ -89,6 +89,30 @@ pub enum OpenOp {
         hidden: usize,
         vocab: usize,
     },
+    /// Multi-head latent attention (DeepSeek-V3): low-rank Q and KV, RoPE on a decoupled key.
+    Mla {
+        n_heads: usize,
+        q_lora: usize,
+        kv_lora: usize,
+        qk_nope: usize,
+        qk_rope: usize,
+        v_dim: usize,
+        rope_theta: u64,
+    },
+    /// DeepSeek-V3 MoE: sigmoid router, group-limited top-k, plus a shared expert that always runs.
+    DeepSeekMoe {
+        n_routed: usize,
+        n_shared: usize,
+        top_k: usize,
+        n_group: usize,
+        topk_group: usize,
+        hidden: usize,
+        moe_intermediate: usize,
+        /// `routed_scaling_factor` stored in milli-units (2.5 → 2500) so the op stays `Eq`.
+        routed_scale_milli: u32,
+    },
+    /// Convex mix of two same-shaped activations. Scalar gate, sigmoid weight.
+    Mix,
 }
 
 impl OpenOp {
@@ -114,6 +138,9 @@ impl OpenOp {
             OpenOp::Router { .. } => "router",
             OpenOp::MoE { .. } => "moe",
             OpenOp::LmHead { .. } => "lm_head",
+            OpenOp::Mla { .. } => "mla",
+            OpenOp::DeepSeekMoe { .. } => "deepseek_moe",
+            OpenOp::Mix => "mix",
         }
     }
 
@@ -192,9 +219,12 @@ impl OpenOp {
                 dims.push(*hidden);
                 Ok(TensorType { shape: Shape { dims }, dtype: DType::F32 })
             }
-            OpenOp::RmsNorm { .. } | OpenOp::SwiGlu { .. } | OpenOp::MoE { .. } => {
-                Ok(input.clone())
-            }
+            OpenOp::RmsNorm { .. }
+            | OpenOp::SwiGlu { .. }
+            | OpenOp::MoE { .. }
+            | OpenOp::Mla { .. }
+            | OpenOp::DeepSeekMoe { .. }
+            | OpenOp::Mix => Ok(input.clone()),
             OpenOp::Router { n_experts, .. } => {
                 let mut dims = input.shape.dims.clone();
                 if dims.is_empty() {
@@ -273,6 +303,40 @@ impl OpenOp {
                 }
                 iface
             }
+            OpenOp::Mla { n_heads, q_lora, kv_lora, qk_nope, qk_rope, v_dim, .. } => {
+                let h = in_features.unwrap_or(1);
+                let q_head = qk_nope + qk_rope;
+                Interface::new(format!("{name}.S"))
+                    .port("w_dq", TensorType::f32([h, *q_lora]))
+                    .port("q_norm", TensorType::f32([*q_lora]))
+                    .port("w_uq", TensorType::f32([*q_lora, n_heads * q_head]))
+                    .port("w_dkv", TensorType::f32([h, *kv_lora]))
+                    .port("kv_norm", TensorType::f32([*kv_lora]))
+                    .port("w_uk", TensorType::f32([*kv_lora, n_heads * qk_nope]))
+                    .port("w_uv", TensorType::f32([*kv_lora, n_heads * v_dim]))
+                    .port("w_kr", TensorType::f32([h, *qk_rope]))
+                    .port("w_o", TensorType::f32([n_heads * v_dim, h]))
+            }
+            OpenOp::DeepSeekMoe {
+                n_routed, n_shared, hidden, moe_intermediate, ..
+            } => {
+                let mut iface = Interface::new(format!("{name}.S"))
+                    .port("gate", TensorType::f32([*hidden, *n_routed]));
+                for s in 0..*n_shared {
+                    iface = iface
+                        .port(format!("s{s}.w1"), TensorType::f32([*hidden, *moe_intermediate]))
+                        .port(format!("s{s}.w3"), TensorType::f32([*hidden, *moe_intermediate]))
+                        .port(format!("s{s}.w2"), TensorType::f32([*moe_intermediate, *hidden]));
+                }
+                for e in 0..*n_routed {
+                    iface = iface
+                        .port(format!("e{e}.w1"), TensorType::f32([*hidden, *moe_intermediate]))
+                        .port(format!("e{e}.w3"), TensorType::f32([*hidden, *moe_intermediate]))
+                        .port(format!("e{e}.w2"), TensorType::f32([*moe_intermediate, *hidden]));
+                }
+                iface
+            }
+            OpenOp::Mix => Interface::new(format!("{name}.S")).port("gate", TensorType::f32([1])),
             _ => Interface::new(format!("{name}.S")),
         }
     }

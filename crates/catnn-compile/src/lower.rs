@@ -35,20 +35,73 @@ pub fn lower_architecture(arch: &Architecture) -> CatResult<IrGraph> {
     last = Some(input_id);
     next_id += 1;
 
-    for c in arch.components() {
-        let id = NodeId(next_id);
-        let node = lower_component(c, id, arch.materialize_params)?;
-        g.nodes.insert(next_id, node);
-        if let Some(prev) = last {
-            g.edges.push(IrEdge {
-                src: prev,
-                dst: id,
-                src_port: "data".into(),
-                dst_port: "data".into(),
-            });
+    match arch.wiring {
+        catnn_core::architecture::Wiring::Chain => {
+            for c in arch.components() {
+                let id = NodeId(next_id);
+                let node = lower_component(c, id, arch.materialize_params)?;
+                g.nodes.insert(next_id, node);
+                if let Some(prev) = last {
+                    g.edges.push(IrEdge {
+                        src: prev,
+                        dst: id,
+                        src_port: "data".into(),
+                        dst_port: "data".into(),
+                    });
+                }
+                last = Some(id);
+                next_id += 1;
+            }
         }
-        last = Some(id);
-        next_id += 1;
+        catnn_core::architecture::Wiring::Mixture { left, right } => {
+            let parts = arch.components();
+            if parts.len() != left + right + 1 {
+                return Err(catnn_core::CatError::Wiring(
+                    "mixture diagram must be left branch, right branch, then one mix".into(),
+                ));
+            }
+            let mut left_out = input_id;
+            for c in &parts[..left] {
+                let id = NodeId(next_id);
+                g.nodes.insert(next_id, lower_component(c, id, arch.materialize_params)?);
+                g.edges.push(IrEdge {
+                    src: left_out,
+                    dst: id,
+                    src_port: "data".into(),
+                    dst_port: "data".into(),
+                });
+                left_out = id;
+                next_id += 1;
+            }
+            let mut right_out = input_id;
+            for c in &parts[left..left + right] {
+                let id = NodeId(next_id);
+                g.nodes.insert(next_id, lower_component(c, id, arch.materialize_params)?);
+                g.edges.push(IrEdge {
+                    src: right_out,
+                    dst: id,
+                    src_port: "data".into(),
+                    dst_port: "data".into(),
+                });
+                right_out = id;
+                next_id += 1;
+            }
+            let mix_id = NodeId(next_id);
+            g.nodes.insert(next_id, lower_component(&parts[left + right], mix_id, arch.materialize_params)?);
+            g.edges.push(IrEdge {
+                src: left_out,
+                dst: mix_id,
+                src_port: "data".into(),
+                dst_port: "lhs".into(),
+            });
+            g.edges.push(IrEdge {
+                src: right_out,
+                dst: mix_id,
+                src_port: "data".into(),
+                dst_port: "rhs".into(),
+            });
+            last = Some(mix_id);
+        }
     }
 
     if let Some(out) = last {

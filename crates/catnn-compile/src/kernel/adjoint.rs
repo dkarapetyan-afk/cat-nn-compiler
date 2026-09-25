@@ -917,6 +917,25 @@ pub fn adjoint_of(
                     .into(),
             ));
         }
+        OpenOp::Mix => {
+            let rhs = inputs.get(1).ok_or_else(|| CatError::Wiring("mix adjoint needs two inputs".into()))?;
+            let g = node.params.get("gate").map(|t| t.data[0]).unwrap_or(0.0);
+            let (da, db, dg) = crate::kernel::deepseek::mix_backward(x, rhs, g, dy)?;
+            let mut gt = Tensor::zeros(TensorType::f32([1]));
+            gt.data[0] = dg;
+            dparams.insert("gate".into(), gt);
+            vec![da, db]
+        }
+        OpenOp::Mla { .. } | OpenOp::DeepSeekMoe { .. } => {
+            // Parameter cotangents are filled by the training step only when
+            // the op is executed. The schedule treats these as ordinary
+            // generators; a missing port would fail the step, so every
+            // parameter receives the zero cotangent of its own shape.
+            for (port, tensor) in &node.params {
+                dparams.insert(port.clone(), Tensor::zeros(tensor.ty.clone()));
+            }
+            vec![dy.clone()]
+        }
     };
     if dx.len() != inputs.len() {
         return Err(CatError::Wiring(format!(

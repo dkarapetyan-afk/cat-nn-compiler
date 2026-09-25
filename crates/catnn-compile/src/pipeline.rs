@@ -651,6 +651,43 @@ mod tests {
     }
 
     #[test]
+    fn deepseek_mixture_schedules_on_a_cluster_and_costs_more_than_one() {
+        use catnn_core::spec::{deepseek_mixture, deepseek_v3_architecture, DeepSeekV3Config};
+        let cfg = DeepSeekV3Config::tiny();
+        let one = deepseek_v3_architecture(&cfg, 2, 4, true).unwrap();
+        let mix = deepseek_mixture(&cfg, 2, 4, true).unwrap();
+        let cluster = Cluster::demo();
+        let a = stage(&one, &cluster, OptimizerKind::Sgd).unwrap();
+        let b = stage(&mix, &cluster, OptimizerKind::Sgd).unwrap();
+        assert!(a.feasible, "{}", a.rationale);
+        assert!(b.feasible, "{}", b.rationale);
+        assert!(b.graph.nodes.len() > a.graph.nodes.len());
+        let bytes = |s: &StagedTrain| s.devices.iter().map(|d| d.schedule.peaks.buffer).sum::<u64>();
+        assert!(bytes(&b) > bytes(&a), "mixture {} vs one {}", bytes(&b), bytes(&a));
+        let graph = crate::lower::lower_architecture(&mix).unwrap();
+        let mut env: std::collections::HashMap<u32, catnn_core::tensor::Tensor> =
+            std::collections::HashMap::new();
+        let input = graph.nodes.values().find(|n| graph.inputs.contains(&n.id)).unwrap();
+        env.insert(input.id.0, catnn_core::tensor::Tensor::lcg(input.output_ty.clone(), 3));
+        for id in graph.topo().unwrap() {
+            if graph.inputs.contains(&id) {
+                continue;
+            }
+            let node = graph.node(id).unwrap();
+            let inputs: Vec<_> = graph
+                .preds(id)
+                .iter()
+                .map(|p| env[&p.0].clone())
+                .collect();
+            let y = crate::kernel::eval_cpu(node, &inputs).unwrap();
+            env.insert(id.0, y);
+        }
+        let out = &env[&graph.outputs[0].0];
+        assert_eq!(out.ty.shape.dims, vec![2, 4, cfg.vocab_size]);
+        assert!(out.data.iter().all(|v| v.is_finite()));
+    }
+
+    #[test]
     fn transformer_reference_step_is_finite() {
         let arch = transformer_block_spec(1, 2, 4, 2).unwrap();
         let staged = stage(&arch, &Cluster::single_cpu(), OptimizerKind::Sgd).unwrap();

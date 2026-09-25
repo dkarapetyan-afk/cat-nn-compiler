@@ -37,7 +37,10 @@ pub fn emit(op: &OpenOp, name: &str) -> WgslKernel {
         | OpenOp::SwiGlu { .. }
         | OpenOp::Router { .. }
         | OpenOp::MoE { .. }
-        | OpenOp::LmHead { .. } => elementwise(name, "copy", "x"),
+        | OpenOp::LmHead { .. }
+        | OpenOp::Mla { .. }
+        | OpenOp::DeepSeekMoe { .. }
+        | OpenOp::Mix => elementwise(name, "copy", "x"),
     }
 }
 

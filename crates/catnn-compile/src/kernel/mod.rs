@@ -3,6 +3,7 @@
 pub mod adjoint;
 pub mod cpu;
 pub mod cuda;
+pub mod deepseek;
 pub mod fd64;
 pub mod measure;
 pub mod moe;
@@ -128,6 +129,59 @@ pub fn eval_cpu(node: &IrNode, inputs: &[Tensor]) -> CatResult<Tensor> {
         ),
         OpenOp::LmHead { vocab, .. } => moe::lm_head(x, node.params.get("w").unwrap(), *vocab),
         OpenOp::Router { .. } => Ok(x.clone()),
+        OpenOp::Mla {
+            n_heads, qk_nope, qk_rope, v_dim, rope_theta, ..
+        } => deepseek::mla(
+            x,
+            node.params.get("w_dq").unwrap(),
+            node.params.get("q_norm").unwrap(),
+            node.params.get("w_uq").unwrap(),
+            node.params.get("w_dkv").unwrap(),
+            node.params.get("kv_norm").unwrap(),
+            node.params.get("w_uk").unwrap(),
+            node.params.get("w_uv").unwrap(),
+            node.params.get("w_kr").unwrap(),
+            node.params.get("w_o").unwrap(),
+            *n_heads,
+            *qk_nope,
+            *qk_rope,
+            *v_dim,
+            *rope_theta as f64,
+        ),
+        OpenOp::DeepSeekMoe { top_k, n_group, topk_group, n_routed, n_shared, routed_scale_milli, .. } => {
+            let gate = node.params.get("gate").unwrap();
+            let mut shared = Vec::new();
+            for s in 0..*n_shared {
+                shared.push((
+                    node.params.get(&format!("s{s}.w1")).unwrap().clone(),
+                    node.params.get(&format!("s{s}.w3")).unwrap().clone(),
+                    node.params.get(&format!("s{s}.w2")).unwrap().clone(),
+                ));
+            }
+            let mut routed = Vec::new();
+            for e in 0..*n_routed {
+                routed.push((
+                    node.params.get(&format!("e{e}.w1")).unwrap().clone(),
+                    node.params.get(&format!("e{e}.w3")).unwrap().clone(),
+                    node.params.get(&format!("e{e}.w2")).unwrap().clone(),
+                ));
+            }
+            deepseek::deepseek_moe(
+                x,
+                gate,
+                &shared,
+                &routed,
+                *top_k,
+                *n_group,
+                *topk_group,
+                *routed_scale_milli as f32 / 1000.0,
+            )
+        }
+        OpenOp::Mix => {
+            let rhs = inputs.get(1).ok_or_else(|| catnn_core::CatError::Wiring("mix needs two inputs".into()))?;
+            let g = node.params.get("gate").map(|t| t.data[0]).unwrap_or(0.0);
+            deepseek::mix(x, rhs, g)
+        }
     }
 }
 
@@ -180,7 +234,10 @@ pub fn eval_reference(node: &IrNode, inputs: &[Tensor]) -> CatResult<Tensor> {
         | OpenOp::SwiGlu { .. }
         | OpenOp::MoE { .. }
         | OpenOp::GqaAttention { .. }
-        | OpenOp::LmHead { .. }
-        | OpenOp::Router { .. } => eval_cpu(node, inputs),
+        |         OpenOp::LmHead { .. }
+        | OpenOp::Router { .. }
+        | OpenOp::Mla { .. }
+        | OpenOp::DeepSeekMoe { .. }
+        | OpenOp::Mix => eval_cpu(node, inputs),
     }
 }

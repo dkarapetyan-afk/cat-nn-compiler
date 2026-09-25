@@ -7,7 +7,7 @@ pub mod memory;
 pub mod realization;
 pub mod spark;
 
-pub use arch::{ArchMorphism, ArchRefinementKind, Architecture};
+pub use arch::{ArchMorphism, ArchRefinementKind, Architecture, Wiring};
 pub use fibration::{enumerate_realizations, reindex, reindex_id_is_id, Fibre, TotalObj};
 pub use hardware::{Cluster, Device, DeviceKind, Link, Node};
 pub use memory::{

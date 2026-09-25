@@ -210,6 +210,30 @@ fn load_arch(spec: &str) -> Result<Architecture> {
             Ok(mixtral_architecture(&MixtralConfig::mixtral_8x7b(), 1, 1, false)?)
         }
         "mixtral-8x22b" => Ok(mixtral_architecture(&MixtralConfig::mixtral_8x22b(), 1, 1, false)?),
+        "deepseek-v3" => Ok(catnn_core::deepseek_v3_architecture(
+            &catnn_core::DeepSeekV3Config::v3(),
+            1,
+            1,
+            false,
+        )?),
+        "deepseek-tiny" => Ok(catnn_core::deepseek_v3_architecture(
+            &catnn_core::DeepSeekV3Config::tiny(),
+            2,
+            4,
+            true,
+        )?),
+        "deepseek-connected" => Ok(catnn_core::deepseek_connected(
+            &catnn_core::DeepSeekV3Config::tiny(),
+            2,
+            4,
+            true,
+        )?),
+        "deepseek-mixture" => Ok(catnn_core::deepseek_mixture(
+            &catnn_core::DeepSeekV3Config::tiny(),
+            2,
+            4,
+            true,
+        )?),
         path => {
             let src = fs::read_to_string(path).with_context(|| format!("read spec {path}"))?;
             let parsed: NetworkSpec = parse_auto(&src, Some(path))?;

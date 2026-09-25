@@ -19,7 +19,8 @@ pub const SPARK_ARCH: &str = "sm_121";
 pub fn emit(op: &OpenOp, name: &str) -> CudaKernel {
     let body = match op {
         OpenOp::RmsNorm { .. } => rmsnorm_src(),
-        OpenOp::SwiGlu { .. } | OpenOp::MoE { .. } => swiglu_src(),
+        OpenOp::SwiGlu { .. } | OpenOp::MoE { .. } | OpenOp::DeepSeekMoe { .. } => swiglu_src(),
+        OpenOp::Mla { .. } => gqa_src(),
         OpenOp::GqaAttention { .. } | OpenOp::Attention { .. } => gqa_src(),
         OpenOp::Router { .. } => router_src(),
         OpenOp::Linear { .. }
@@ -54,7 +55,8 @@ pub fn emit(op: &OpenOp, name: &str) -> CudaKernel {
 fn entry_of(op: &OpenOp) -> &'static str {
     match op {
         OpenOp::RmsNorm { .. } => "catnn_rmsnorm",
-        OpenOp::SwiGlu { .. } | OpenOp::MoE { .. } => "catnn_swiglu",
+        OpenOp::SwiGlu { .. } | OpenOp::MoE { .. } | OpenOp::DeepSeekMoe { .. } => "catnn_swiglu",
+        OpenOp::Mla { .. } => "catnn_gqa",
         OpenOp::GqaAttention { .. } | OpenOp::Attention { .. } => "catnn_gqa",
         OpenOp::Router { .. } => "catnn_router",
         _ => "catnn_gemm",

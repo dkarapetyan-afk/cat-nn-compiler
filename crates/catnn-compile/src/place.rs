@@ -67,6 +67,8 @@ fn is_heavy(op: &OpenOp) -> bool {
             | OpenOp::Attention { .. }
             | OpenOp::GqaAttention { .. }
             | OpenOp::MoE { .. }
+            | OpenOp::Mla { .. }
+            | OpenOp::DeepSeekMoe { .. }
             | OpenOp::SwiGlu { .. }
     )
 }

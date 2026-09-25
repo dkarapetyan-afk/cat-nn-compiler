@@ -24,8 +24,9 @@ pub use lens::{
     UnlawfulWitness,
 };
 pub use spec::{
-    mixtral_architecture, mlp_spec, transformer_block_spec, MixtralConfig, NetworkBuilder,
-    NetworkSpec,
+    deepseek_connected, deepseek_mixture, deepseek_trunk, deepseek_v3_architecture,
+    mixtral_architecture, mlp_spec, transformer_block_spec, DeepSeekV3Config, MixtralConfig,
+    NetworkBuilder, NetworkSpec,
 };
 pub use tensor::{DType, Shape, Tensor, TensorType};
 
