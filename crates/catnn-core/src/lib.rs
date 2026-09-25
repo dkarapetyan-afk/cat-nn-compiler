@@ -11,8 +11,9 @@ pub mod spec;
 pub mod tensor;
 
 pub use architecture::{
-    enumerate_realizations, reindex, ArchMorphism, Architecture, Cluster, Device, DeviceKind,
-    Fibre, KernelBackend, Placement, Realization,
+    enumerate_realizations, reindex, spark_cluster, ArchMorphism, Architecture, Cluster, Device,
+    DeviceKind, DgxSparkSpec, Fibre, KernelBackend, Placement, Precision, Realization,
+    SparkTopology,
 };
 pub use category::{flatten_seq, EquivWitness, Hom, Interface, OpenOp, Rewrite, Tens, TwoCell};
 pub use error::{CatError, CatResult};
@@ -20,7 +21,10 @@ pub use lens::{
     first_of_pair, CompositeSystem, LawfulLens, Observation, OpenComponent, Optic, PolicyState,
     StructuredCospan, UnlawfulWitness,
 };
-pub use spec::{mlp_spec, transformer_block_spec, NetworkBuilder, NetworkSpec};
+pub use spec::{
+    mixtral_architecture, mlp_spec, transformer_block_spec, MixtralConfig, NetworkBuilder,
+    NetworkSpec,
+};
 pub use tensor::{DType, Shape, Tensor, TensorType};
 
 /// Composition of two 1-morphisms in `Tens` — re-export for callers that

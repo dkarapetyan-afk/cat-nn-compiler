@@ -1,6 +1,8 @@
 //! Kernel backends: executable CPU, generated+validated WGSL, naive reference.
 
 pub mod cpu;
+pub mod cuda;
+pub mod moe;
 pub mod reference;
 pub mod wgsl;
 
@@ -64,6 +66,64 @@ pub fn eval_cpu(node: &IrNode, inputs: &[Tensor]) -> CatResult<Tensor> {
             let wo = node.params.get("wo").unwrap();
             cpu::attention(x, wq, wk, wv, wo, *n_heads, *d_head)
         }
+        OpenOp::RmsNorm { eps_e6 } => {
+            let w = node.params.get("w").ok_or_else(|| catnn_core::CatError::UnknownPort {
+                interface: node.name.clone(),
+                port: "w".into(),
+            })?;
+            moe::rmsnorm(x, w, *eps_e6 as f32 * 1e-6)
+        }
+        OpenOp::Embedding { hidden, .. } => {
+            let table = node.params.get("w").ok_or_else(|| catnn_core::CatError::UnknownPort {
+                interface: node.name.clone(),
+                port: "w".into(),
+            })?;
+            let ids: Vec<u32> =
+                x.data.iter().map(|v| v.round().clamp(0.0, u32::MAX as f32) as u32).collect();
+            let mut y = moe::embedding(&ids, table, *hidden)?;
+            if x.ty.shape.dims.len() == 2 {
+                y.ty = catnn_core::tensor::TensorType::f32([
+                    x.ty.shape.dims[0],
+                    x.ty.shape.dims[1],
+                    *hidden,
+                ]);
+            }
+            Ok(y)
+        }
+        OpenOp::SwiGlu { .. } => {
+            let w1 = node.params.get("w1").unwrap();
+            let w3 = node.params.get("w3").unwrap();
+            let w2 = node.params.get("w2").unwrap();
+            moe::swiglu(x, w1, w3, w2)
+        }
+        OpenOp::MoE { top_k, n_experts, .. } => {
+            let gate = node.params.get("gate").unwrap();
+            let mut experts = Vec::new();
+            for e in 0..*n_experts {
+                experts.push((
+                    node.params.get(&format!("e{e}.w1")).unwrap().clone(),
+                    node.params.get(&format!("e{e}.w3")).unwrap().clone(),
+                    node.params.get(&format!("e{e}.w2")).unwrap().clone(),
+                ));
+            }
+            moe::moe(x, gate, &experts, *top_k)
+        }
+        OpenOp::GqaAttention {
+            n_heads, n_kv_heads, head_dim, sliding_window, rope_theta, ..
+        } => moe::gqa(
+            x,
+            node.params.get("wq").unwrap(),
+            node.params.get("wk").unwrap(),
+            node.params.get("wv").unwrap(),
+            node.params.get("wo").unwrap(),
+            *n_heads,
+            *n_kv_heads,
+            *head_dim,
+            *rope_theta as f64,
+            *sliding_window,
+        ),
+        OpenOp::LmHead { vocab, .. } => moe::lm_head(x, node.params.get("w").unwrap(), *vocab),
+        OpenOp::Router { .. } => Ok(x.clone()),
     }
 }
 
@@ -111,5 +171,12 @@ pub fn eval_reference(node: &IrNode, inputs: &[Tensor]) -> CatResult<Tensor> {
             let wo = node.params.get("wo").unwrap();
             reference::attention(x, wq, wk, wv, wo, *n_heads, *d_head)
         }
+        OpenOp::RmsNorm { .. }
+        | OpenOp::Embedding { .. }
+        | OpenOp::SwiGlu { .. }
+        | OpenOp::MoE { .. }
+        | OpenOp::GqaAttention { .. }
+        | OpenOp::LmHead { .. }
+        | OpenOp::Router { .. } => eval_cpu(node, inputs),
     }
 }

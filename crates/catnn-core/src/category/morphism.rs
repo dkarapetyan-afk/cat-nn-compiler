@@ -18,18 +18,77 @@ use crate::tensor::{DType, Shape, TensorType};
 #[serde(rename_all = "snake_case")]
 pub enum OpenOp {
     Identity,
-    Linear { in_features: usize, out_features: usize, bias: bool },
+    Linear {
+        in_features: usize,
+        out_features: usize,
+        bias: bool,
+    },
     Relu,
     Gelu,
-    Softmax { axis: i32 },
-    LayerNorm { eps_e6: u32 },
+    Softmax {
+        axis: i32,
+    },
+    LayerNorm {
+        eps_e6: u32,
+    },
     Add,
     Mul,
     MatMul,
-    Transpose { dim0: usize, dim1: usize },
-    Reshape { out: Vec<usize> },
-    Attention { n_heads: usize, d_model: usize, d_head: usize },
+    Transpose {
+        dim0: usize,
+        dim1: usize,
+    },
+    Reshape {
+        out: Vec<usize>,
+    },
+    Attention {
+        n_heads: usize,
+        d_model: usize,
+        d_head: usize,
+    },
     ResidualAdd,
+    /// Token embedding table `V × H`. Input is integer token ids `[B,S]`.
+    Embedding {
+        vocab: usize,
+        hidden: usize,
+    },
+    /// RMSNorm (Mixtral / Llama): `x * rsqrt(mean(x²) + eps) * w`. No bias.
+    RmsNorm {
+        eps_e6: u32,
+    },
+    /// Grouped-query attention + RoPE, optional sliding window.
+    GqaAttention {
+        n_heads: usize,
+        n_kv_heads: usize,
+        head_dim: usize,
+        d_model: usize,
+        /// `None` matches official HF `sliding_window: null`.
+        sliding_window: Option<usize>,
+        /// RoPE θ as an integer (HF `rope_theta`, e.g. 1_000_000).
+        rope_theta: u64,
+    },
+    /// SwiGLU expert: `w2(silu(w1 x) ⊙ (w3 x))`.
+    SwiGlu {
+        hidden: usize,
+        intermediate: usize,
+    },
+    /// Softmax router producing top-k of n experts. An *optic*, not a lens.
+    Router {
+        n_experts: usize,
+        top_k: usize,
+    },
+    /// Indexed family / coproduct of SwiGLU experts + router + combine.
+    MoE {
+        n_experts: usize,
+        top_k: usize,
+        hidden: usize,
+        intermediate: usize,
+    },
+    /// Untied LM head: `H → V`.
+    LmHead {
+        hidden: usize,
+        vocab: usize,
+    },
 }
 
 impl OpenOp {
@@ -48,6 +107,13 @@ impl OpenOp {
             OpenOp::Reshape { .. } => "reshape",
             OpenOp::Attention { .. } => "attention",
             OpenOp::ResidualAdd => "residual_add",
+            OpenOp::Embedding { .. } => "embedding",
+            OpenOp::RmsNorm { .. } => "rmsnorm",
+            OpenOp::GqaAttention { .. } => "gqa",
+            OpenOp::SwiGlu { .. } => "swiglu",
+            OpenOp::Router { .. } => "router",
+            OpenOp::MoE { .. } => "moe",
+            OpenOp::LmHead { .. } => "lm_head",
         }
     }
 
@@ -113,12 +179,36 @@ impl OpenOp {
                 }
                 Ok(TensorType { shape: Shape::new(out.clone()), dtype: input.dtype })
             }
-            OpenOp::Attention { d_model, .. } => {
+            OpenOp::Attention { d_model, .. } | OpenOp::GqaAttention { d_model, .. } => {
                 let mut dims = input.shape.dims.clone();
                 if dims.len() < 2 {
                     return Err(CatError::ShapeMismatch("attention needs [B,S,D]".into()));
                 }
                 *dims.last_mut().unwrap() = *d_model;
+                Ok(TensorType { shape: Shape { dims }, dtype: input.dtype })
+            }
+            OpenOp::Embedding { hidden, .. } => {
+                let mut dims = input.shape.dims.clone();
+                dims.push(*hidden);
+                Ok(TensorType { shape: Shape { dims }, dtype: DType::F32 })
+            }
+            OpenOp::RmsNorm { .. } | OpenOp::SwiGlu { .. } | OpenOp::MoE { .. } => {
+                Ok(input.clone())
+            }
+            OpenOp::Router { n_experts, .. } => {
+                let mut dims = input.shape.dims.clone();
+                if dims.is_empty() {
+                    return Err(CatError::ShapeMismatch("router on scalar".into()));
+                }
+                *dims.last_mut().unwrap() = *n_experts;
+                Ok(TensorType { shape: Shape { dims }, dtype: input.dtype })
+            }
+            OpenOp::LmHead { vocab, .. } => {
+                let mut dims = input.shape.dims.clone();
+                if dims.is_empty() {
+                    return Err(CatError::ShapeMismatch("lm_head on scalar".into()));
+                }
+                *dims.last_mut().unwrap() = *vocab;
                 Ok(TensorType { shape: Shape { dims }, dtype: input.dtype })
             }
         }
@@ -147,6 +237,41 @@ impl OpenOp {
                     .port("wk", TensorType::f32([d, d]))
                     .port("wv", TensorType::f32([d, d]))
                     .port("wo", TensorType::f32([d, d]))
+            }
+            OpenOp::Embedding { vocab, hidden } | OpenOp::LmHead { vocab, hidden } => {
+                Interface::new(format!("{name}.S")).port("w", TensorType::f32([*vocab, *hidden]))
+            }
+            OpenOp::RmsNorm { .. } => {
+                let n = in_features.unwrap_or(1);
+                Interface::new(format!("{name}.S")).port("w", TensorType::f32([n]))
+            }
+            OpenOp::GqaAttention { n_kv_heads, head_dim, d_model, .. } => {
+                let d = *d_model;
+                let kv = *n_kv_heads * *head_dim;
+                Interface::new(format!("{name}.S"))
+                    .port("wq", TensorType::f32([d, d]))
+                    .port("wk", TensorType::f32([d, kv]))
+                    .port("wv", TensorType::f32([d, kv]))
+                    .port("wo", TensorType::f32([d, d]))
+            }
+            OpenOp::SwiGlu { hidden, intermediate } => Interface::new(format!("{name}.S"))
+                .port("w1", TensorType::f32([*hidden, *intermediate]))
+                .port("w3", TensorType::f32([*hidden, *intermediate]))
+                .port("w2", TensorType::f32([*intermediate, *hidden])),
+            OpenOp::Router { n_experts, .. } => {
+                let h = in_features.unwrap_or(1);
+                Interface::new(format!("{name}.S")).port("gate", TensorType::f32([h, *n_experts]))
+            }
+            OpenOp::MoE { n_experts, hidden, intermediate, .. } => {
+                let mut iface = Interface::new(format!("{name}.S"))
+                    .port("gate", TensorType::f32([*hidden, *n_experts]));
+                for e in 0..*n_experts {
+                    iface = iface
+                        .port(format!("e{e}.w1"), TensorType::f32([*hidden, *intermediate]))
+                        .port(format!("e{e}.w3"), TensorType::f32([*hidden, *intermediate]))
+                        .port(format!("e{e}.w2"), TensorType::f32([*intermediate, *hidden]));
+                }
+                iface
             }
             _ => Interface::new(format!("{name}.S")),
         }

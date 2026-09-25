@@ -31,6 +31,13 @@ pub fn emit(op: &OpenOp, name: &str) -> WgslKernel {
         OpenOp::Identity | OpenOp::Transpose { .. } | OpenOp::Reshape { .. } => {
             elementwise(name, "copy", "x")
         }
+        OpenOp::RmsNorm { .. } => layernorm(name),
+        OpenOp::Embedding { .. }
+        | OpenOp::GqaAttention { .. }
+        | OpenOp::SwiGlu { .. }
+        | OpenOp::Router { .. }
+        | OpenOp::MoE { .. }
+        | OpenOp::LmHead { .. } => elementwise(name, "copy", "x"),
     }
 }
 

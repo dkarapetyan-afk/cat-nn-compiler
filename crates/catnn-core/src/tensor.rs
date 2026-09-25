@@ -17,6 +17,11 @@ use crate::error::{CatError, CatResult};
 pub enum DType {
     F32,
     F16,
+    BF16,
+    /// E4M3 / E5M2-class 8-bit float used for Spark FP8 plans.
+    FP8,
+    /// Blackwell NVFP4 / FP4 packed 4-bit. Storage is packed; see [`DType::packed_bytes`].
+    FP4,
     I32,
     Bool,
 }
@@ -25,8 +30,17 @@ impl DType {
     pub fn size_bytes(self) -> usize {
         match self {
             DType::F32 | DType::I32 => 4,
-            DType::F16 => 2,
-            DType::Bool => 1,
+            DType::F16 | DType::BF16 => 2,
+            DType::FP8 | DType::Bool => 1,
+            DType::FP4 => 1, // packed; use packed_bytes for exact counts
+        }
+    }
+
+    /// Exact payload size for `numel` elements (FP4 packs two values per byte).
+    pub fn packed_bytes(self, numel: usize) -> u64 {
+        match self {
+            DType::FP4 => (numel as u64 + 1) / 2,
+            _ => numel as u64 * self.size_bytes() as u64,
         }
     }
 
@@ -34,6 +48,9 @@ impl DType {
         match self {
             DType::F32 => "f32",
             DType::F16 => "f16",
+            DType::BF16 => "bf16",
+            DType::FP8 => "fp8",
+            DType::FP4 => "fp4",
             DType::I32 => "i32",
             DType::Bool => "bool",
         }
@@ -43,6 +60,9 @@ impl DType {
         match s.trim().to_ascii_lowercase().as_str() {
             "f32" | "float32" => Ok(DType::F32),
             "f16" | "float16" => Ok(DType::F16),
+            "bf16" | "bfloat16" => Ok(DType::BF16),
+            "fp8" | "e4m3" | "e5m2" => Ok(DType::FP8),
+            "fp4" | "nvfp4" => Ok(DType::FP4),
             "i32" | "int32" => Ok(DType::I32),
             "bool" => Ok(DType::Bool),
             other => Err(CatError::Parse(format!("unknown dtype {other}"))),
@@ -80,7 +100,7 @@ impl Shape {
     }
 
     pub fn bytes(&self, dtype: DType) -> usize {
-        self.numel() * dtype.size_bytes()
+        dtype.packed_bytes(self.numel()) as usize
     }
 
     /// Matrix-multiply result shape: `[..., M, K] × [..., K, N] → [..., M, N]`.

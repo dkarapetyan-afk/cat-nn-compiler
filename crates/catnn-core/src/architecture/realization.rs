@@ -50,6 +50,8 @@ pub enum KernelBackend {
     CpuRust,
     Wgsl,
     Reference,
+    /// CUDA generated for GB10 / `sm_121`.
+    CudaSm121,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

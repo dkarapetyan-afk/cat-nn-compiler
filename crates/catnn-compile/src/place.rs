@@ -60,7 +60,15 @@ pub fn estimate(graph: &IrGraph, placement: &Placement, cluster: &Cluster) -> Co
 }
 
 fn is_heavy(op: &OpenOp) -> bool {
-    matches!(op, OpenOp::Linear { .. } | OpenOp::MatMul | OpenOp::Attention { .. })
+    matches!(
+        op,
+        OpenOp::Linear { .. }
+            | OpenOp::MatMul
+            | OpenOp::Attention { .. }
+            | OpenOp::GqaAttention { .. }
+            | OpenOp::MoE { .. }
+            | OpenOp::SwiGlu { .. }
+    )
 }
 
 /// Greedy placement: put each op on the device that minimises incremental cost.

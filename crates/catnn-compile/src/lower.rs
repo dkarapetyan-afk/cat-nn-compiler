@@ -37,7 +37,7 @@ pub fn lower_architecture(arch: &Architecture) -> CatResult<IrGraph> {
 
     for c in arch.components() {
         let id = NodeId(next_id);
-        let node = lower_component(c, id)?;
+        let node = lower_component(c, id, arch.materialize_params)?;
         g.nodes.insert(next_id, node);
         if let Some(prev) = last {
             g.edges.push(IrEdge {
@@ -58,12 +58,14 @@ pub fn lower_architecture(arch: &Architecture) -> CatResult<IrGraph> {
     Ok(g)
 }
 
-fn lower_component(c: &OpenComponent, id: NodeId) -> CatResult<IrNode> {
+fn lower_component(c: &OpenComponent, id: NodeId, materialize: bool) -> CatResult<IrNode> {
     let output_ty = c.output.ports.values().next().cloned().unwrap_or_else(|| TensorType::f32([1]));
     let mut params = IndexMap::new();
     let seed_base = id.0 as u64 * 1009 + 17;
-    for (i, (pname, ty)) in c.state.ports.iter().enumerate() {
-        params.insert(pname.clone(), Tensor::lcg(ty.clone(), seed_base + i as u64));
+    if materialize {
+        for (i, (pname, ty)) in c.state.ports.iter().enumerate() {
+            params.insert(pname.clone(), Tensor::lcg(ty.clone(), seed_base + i as u64));
+        }
     }
     Ok(IrNode { id, name: c.name.clone(), op: c.op.clone(), output_ty, params })
 }

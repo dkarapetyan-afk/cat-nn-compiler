@@ -159,6 +159,44 @@ Honest list, not a roadmap disguised as completeness:
 - `catnn-rt::sheaf` — restrict, glue, failed descent.
 - `catnn-compile` — CPU vs reference on an MLP; every generated WGSL shader parses under naga.
 - `crates/catnn-rt/tests/e2e.rs` — MLP from `.catnn`, transformer, one adapt step.
+- `catnn-core::spec::mixtral` — HF 8x7B / 8x22B param counts; tiny architecture type-check.
+- `catnn-core::lens::moe` — expert coproduct injections; router is an unlawful optic.
+- `catnn-compile::kernel::moe` — scaled-down Mixtral CPU vs independent naïve reference.
+- `catnn-compile::spark_place` — 8x22B BF16 on 1 Spark is infeasible; 8x7B FP4 fits.
+
+## Mixtral and DGX Spark
+
+Mixtral is specified as a composite of open systems, not a hard-coded runner:
+
+- Token embed → (RMSNorm → GQA+RoPE → RMSNorm → MoE)×L → RMSNorm → LM head.
+- The MoE block is a **coproduct** of SwiGLU experts (`ExpertFamily`) plus a **router optic** (top-2-of-N softmax). Top-k is a projection, so the router is not a lawful lens (`PutGet` fails; residual = load-balance counts).
+- Expert placement is a realization in `R(A)` over the Spark cluster object of `H` (EP / TP / PP).
+
+Hyperparameters are copied from the official Hugging Face `config.json` files:
+
+| | 8x7B (`mistralai/Mixtral-8x7B-v0.1`) | 8x22B (`mistralai/Mixtral-8x22B-v0.1`) |
+|---|---|---|
+| hidden / intermediate | 4096 / 14336 | 6144 / 16384 |
+| layers | 32 | 56 |
+| heads / KV heads | 32 / 8 | 48 / 8 |
+| experts / top-k | 8 / 2 | 8 / 2 |
+| vocab / ctx | 32000 / 32768 | 32000 / 65536 |
+| rms_eps / rope_θ | 1e-5 / 1e6 | 1e-5 / 1e6 |
+| sliding_window | `null` in HF (paper heritage 4096) | `null` |
+
+```bash
+cargo run -p catnn-cli -- mixtral-tiny
+cargo run -p catnn-cli -- compile mixtral-8x7b --cluster spark4
+cargo run -p catnn-cli -- mixtral-sweep
+```
+
+### DGX Spark (cited)
+
+NVIDIA product page: GB10 Grace Blackwell, **128 GB** unified LPDDR5x, **273 GB/s**, ConnectX-7 **200 Gb/s**, up to **1 PFLOP FP4**, 20-core Arm. Compute capability **12.1 / `sm_121`** (not datacenter `sm_100`). Official Cluster Assistant: **2–4** Sparks (direct 2–3, switch 2–4). N=8 is accepted as a manual topology and flagged unsupported.
+
+Placement uses 20 GiB OS + 4 GiB workspace reserve (usable **104 GiB**). Feasibility is a real memory check, not a stub. CUDA kernels are emitted for `sm_121`; `nvcc` is used if present, otherwise generation-only.
+
+Full-size weights (~93 GB bf16 for 8x7B) are **not** materialized. Numerical check is the tiny config (same ops, seeded weights) vs an independent naïve reference. Optional `--weights` safetensors path errors clearly if the file is absent — Hugging Face transformers is **not** run in CI.
 
 ## License
 

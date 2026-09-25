@@ -20,6 +20,14 @@ pub struct Architecture {
     pub system: CompositeSystem,
     pub hom: Hom,
     pub cospan: Option<StructuredCospan>,
+    /// When false, lowering records parameter *shapes* but does not fill
+    /// tensors (full Mixtral is ~93 GB in bf16 — we refuse to allocate it).
+    #[serde(default = "default_materialize")]
+    pub materialize_params: bool,
+}
+
+fn default_materialize() -> bool {
+    true
 }
 
 impl Architecture {
@@ -27,7 +35,7 @@ impl Architecture {
         let id = id.into();
         let hom = system.as_hom();
         let cospan = StructuredCospan::from_chain(format!("{id}.apex"), &system.parts).ok();
-        Ok(Self { id, system, hom, cospan })
+        Ok(Self { id, system, hom, cospan, materialize_params: true })
     }
 
     pub fn from_components(id: impl Into<String>, parts: Vec<OpenComponent>) -> CatResult<Self> {

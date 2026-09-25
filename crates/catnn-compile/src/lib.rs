@@ -4,6 +4,7 @@ pub mod ir;
 pub mod kernel;
 pub mod lower;
 pub mod place;
+pub mod spark_place;
 
 use catnn_core::architecture::{Cluster, Realization};
 use catnn_core::Architecture;
