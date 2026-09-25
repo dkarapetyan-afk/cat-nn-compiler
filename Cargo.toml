@@ -1,0 +1,37 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/catnn-core",
+    "crates/catnn-compile",
+    "crates/catnn-rt",
+    "crates/catnn-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+rust-version = "1.83"
+authors = ["catnn"]
+description = "Higher-categorical compiler and runtime for neural networks"
+
+[workspace.dependencies]
+catnn-core = { path = "crates/catnn-core" }
+catnn-compile = { path = "crates/catnn-compile" }
+catnn-rt = { path = "crates/catnn-rt" }
+# Pinned for rustc 1.83 (workspace MSRV). Newer crates.io releases require edition 2024.
+serde = { version = "=1.0.216", features = ["derive"] }
+serde_json = "=1.0.134"
+toml = "=0.8.19"
+thiserror = "=1.0.69"
+anyhow = "=1.0.94"
+clap = { version = "=4.5.23", features = ["derive"] }
+rayon = "=1.10.0"
+proptest = "=1.5.0"
+indexmap = { version = "=2.6.0", features = ["serde"] }
+wide = "=0.7.28"
+naga = { version = "=23.1.0", default-features = false, features = ["wgsl-in"] }
+
+[profile.release]
+lto = false
+codegen-units = 16

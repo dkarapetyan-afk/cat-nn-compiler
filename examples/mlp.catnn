@@ -1,0 +1,6 @@
+# MLP: 16 → 32 → ReLU → 8, batch 4
+network mlp batch 4
+linear fc1 16 32
+relu act
+linear fc2 32 8
+compose sequential

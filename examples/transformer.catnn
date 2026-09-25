@@ -1,0 +1,9 @@
+# Small transformer block backbone (attention → LN → FFN → LN)
+network transformer_block batch 2
+attention mha 8 16 4
+layernorm ln1 16
+linear ff1 16 32
+gelu ff_act
+linear ff2 32 16
+layernorm ln2 16
+compose sequential

@@ -1,0 +1,19 @@
+name = "mlp"
+batch = 4
+compose = "sequential"
+
+[[layers]]
+op = "linear"
+name = "fc1"
+in_features = 16
+out_features = 32
+
+[[layers]]
+op = "relu"
+name = "act"
+
+[[layers]]
+op = "linear"
+name = "fc2"
+in_features = 32
+out_features = 8

@@ -1,0 +1,21 @@
+[package]
+name = "catnn-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "CLI for the categorical neural-network compiler"
+
+[[bin]]
+name = "catnn"
+path = "src/main.rs"
+
+[dependencies]
+catnn-core.workspace = true
+catnn-compile.workspace = true
+catnn-rt.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+toml_edit = "=0.22.22"
