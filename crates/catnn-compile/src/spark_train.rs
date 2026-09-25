@@ -290,10 +290,21 @@ pub fn plan_train(
                             micro,
                             ckpt,
                         );
-                        let (peaks, rec, _reloads, sim_ok, overflow) =
+                        let (mut peaks, rec, _reloads, sim_ok, overflow) =
                             simulate_regions(cfg, &regions, ep, tp, pp, seq, micro, state, act);
                         let buffer_need = state + act;
+                        if !sim_ok {
+                            // Infeasible timelines used to report a doubled
+                            // buffer sum (checkpoint copy) and zero code/scratch.
+                            // Keep the named overflow, but publish the real
+                            // buffer need and the kernel-descriptor floor.
+                            let floor = kernel_region_floor();
+                            peaks.code = floor.code;
+                            peaks.scratch = floor.scratch;
+                            peaks.buffer = buffer_need;
+                        }
                         let fits = sim_ok && buffer_need <= regions.buffer.bytes && peaks.exceeds(&regions).is_none();
+                        let _ = overflow;
                         let step = train_cost(
                             cfg, &spec, n, ep, tp, pp, dp, seq, global_batch, mixed_fp8, ckpt,
                         );
@@ -323,7 +334,6 @@ pub fn plan_train(
                             assumptions: String::new(),
                             officially_supported: topo.officially_supported(n),
                         };
-                        let _ = overflow;
                         if fits {
                             best = Some(match best {
                                 None => plan,
@@ -464,6 +474,15 @@ pub fn format_train_rationales(plans: &[TrainPlan]) -> String {
     s
 }
 
+fn kernel_region_floor() -> RegionPeaks {
+    let kernels = kernel_resources_for_mixtral();
+    RegionPeaks {
+        code: kernels.iter().map(|k| k.code_footprint()).sum(),
+        buffer: 0,
+        scratch: kernels.iter().map(|k| k.scratch_bytes()).max().unwrap_or(0),
+    }
+}
+
 /// Inference-plan helper: attach simulated region peaks for the decode kernels.
 pub fn inference_region_peaks(weight_bytes: u64, kv: u64, act: u64) -> RegionPeaks {
     let kernels = kernel_resources_for_mixtral();
@@ -485,7 +504,16 @@ pub fn inference_region_peaks(weight_bytes: u64, kv: u64, act: u64) -> RegionPea
         allow_recompute: true,
         allow_reload: true,
     });
-    s.peaks
+    if s.feasible {
+        s.peaks
+    } else {
+        let floor = kernel_region_floor();
+        RegionPeaks {
+            code: floor.code,
+            buffer: weight_bytes.saturating_add(kv).saturating_add(act),
+            scratch: floor.scratch,
+        }
+    }
 }
 
 #[cfg(test)]
