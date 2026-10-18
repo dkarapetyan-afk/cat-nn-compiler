@@ -27,7 +27,7 @@ thiserror = "=2.0.20"
 anyhow = "=1.0.104"
 clap = { version = "=4.6.7", features = ["derive"] }
 rayon = "=1.12.0"
-proptest = "=1.5.0"
+proptest = "=1.11.0"
 indexmap = { version = "=2.6.0", features = ["serde"] }
 wide = "=0.7.28"
 naga = { version = "=24.0.0", default-features = false, features = ["wgsl-in"] }
