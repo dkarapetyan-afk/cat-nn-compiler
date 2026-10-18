@@ -29,7 +29,7 @@ clap = { version = "=4.6.7", features = ["derive"] }
 rayon = "=1.12.0"
 proptest = "=1.11.0"
 indexmap = { version = "=2.6.0", features = ["serde"] }
-wide = "=0.7.28"
+wide = "=1.7.1"
 naga = { version = "=24.0.0", default-features = false, features = ["wgsl-in"] }
 
 [profile.release]
