@@ -23,7 +23,7 @@ catnn-rt = { path = "crates/catnn-rt" }
 serde = { version = "=1.0.216", features = ["derive"] }
 serde_json = "=1.0.134"
 toml = "=0.8.19"
-thiserror = "=1.0.69"
+thiserror = "=2.0.20"
 anyhow = "=1.0.104"
 clap = { version = "=4.6.7", features = ["derive"] }
 rayon = "=1.10.0"
