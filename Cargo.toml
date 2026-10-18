@@ -30,7 +30,7 @@ rayon = "=1.12.0"
 proptest = "=1.5.0"
 indexmap = { version = "=2.6.0", features = ["serde"] }
 wide = "=0.7.28"
-naga = { version = "=23.1.0", default-features = false, features = ["wgsl-in"] }
+naga = { version = "=24.0.0", default-features = false, features = ["wgsl-in"] }
 
 [profile.release]
 lto = false
